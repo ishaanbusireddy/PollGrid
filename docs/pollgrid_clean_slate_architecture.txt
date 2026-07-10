@@ -1,0 +1,2043 @@
+                                                               PollGrid — Clean-Slate Architecture
+
+
+
+
+      ⛊ CLEAN-SLATE BUILD MANUAL · DRAFT 001
+
+
+
+
+      PollGrid
+      A real-time US political intelligence platform: primary-source polling,
+      campaign finance, official election results, legislative activity, and campaign
+      rhetoric — mapped against hyper-granular demographics from the nation
+      down to the precinct, correlated across races and back to 1950, reasoned
+      over by a local Ollama-powered Analyst that never touches the actual math,
+      and rendered on a hand-built 3D map.
+
+        Everything below assumes a from-scratch build. Nothing in the current repo is treated as load-bearing.
+
+
+
+
+         50+6                      5                       3,143+                    435                      2                         1789–
+         STATES, DC &              GEOGRAPHIC              COUNTIES,                 HOUSE DISTRICTS,         STATES SPLITTING          PRESIDENTIAL
+         TERRITORIES               TIERS, NATION →         PARISHES &                REDISTRICTING-           ELECTORS BY               RETURNS
+                                   PRECINCT                BOROUGHS                  VERSIONED                DISTRICT (ME, NE)         IMPORTED,
+                                                                                                                                        CONFIDENCE-
+                                                                                                                                        TAGGED BY ERA
+
+
+
+
+         0                         0
+         LLM CALLS IN THE          AUTO-PUBLISHED
+         AVERAGING/FORECAST        RACE CALLS, EVER
+         MATH PATH
+
+
+
+
+Vision & hard constraints   Architecture at a glance   Domain model     Ingestion layer   Ingestion, made concrete   Extraction & the fact chain   The intelligence en
+
+
+
+
+01 — ORIENT
+
+
+
+
+                                                                                1 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Vision & hard constraints
+
+The pitch: take the actual engineering that makes GlobeGrid good — thread-per-source
+ingestion that degrades instead of crashing, a permanent hash-chained fact chain,
+correlation across sources and across decades, a bounded LLM that narrates but never
+calculates, a hand-rolled WebGL2 renderer with real LOD, a buildless frontend with real
+sound design and real theming — and point all of it at US elections instead of world events.
+Not a redesign of the old PollGrid spec. A new one, built the way GlobeGrid was actually
+built.
+
+
+§ Non-negotiables
+
+1. Primary sources only. Individual pollster releases, the FEC API, Census, the AP
+   Elections API, state Secretary of State feeds, Congress.gov, official campaign transcripts
+   and press releases. Never scrape RealClearPolitics / 538 / 270ToWin's aggregated
+   numbers, ratings, or prose — link out to them, build every average from the underlying
+   releases ourselves.
+
+2. Race calls are never automated. The election-night engine flags a race CALLABLE for
+   human review and stops there. election_night.auto_publish_calls is hardcoded
+    False in code, not just config, and race_calls.called_by must be a real human
+   identifier — never "system" , never a model name.
+
+3. Append-only, everywhere. Poll averages, fundamentals snapshots, forecasts, and the
+   volatility index are all dated snapshots on an as_of axis, never overwritten in place —
+   the same mechanism that runs the archive back to 1950 also runs the time-capsule
+   scrubber for a race that happened yesterday.
+
+4. Provenance is hash-chained, not just logged. Every extracted fact and every prediction
+   chains to the previous row's hash. It proves our own copy wasn't altered after being
+   written — it does not, and never claims to, prove the underlying poll or statement was
+   true.
+
+5. The LLM is bounded and provider-agnostic. Local-first (Ollama), cloud fallbacks behind
+   it. It writes race narratives, dossier prose, and rhetoric classifications inside a fixed rubric
+   — it never touches poll averaging, the fundamentals model, forecasting math, correlation
+   thresholds, the volatility index, or a race call. Every generative feature ships a
+   deterministic fallback the pipeline actually exercises on failure.
+
+6. Every tunable lives in one config file. Thresholds, intervals, weights, model names —
+    config.yaml + .env , schema-validated at boot, fails the whole process loudly on a bad
+   value rather than limping forward.
+
+7. A failing source degrades, never crashes. Thread-per-source, exponential backoff
+   capped at a config ceiling, three-state health ( ok / degraded / down ) — one dead
+   pollster feed can't take down election night.
+
+8. Synthetic data is always tagged and always purgeable in one operation.
+    is_synthetic=1 , one command removes every trace.
+
+
+
+
+02 — ORIENT
+
+
+
+
+                                                                          2 / 40
+                                                                 PollGrid — Clean-Slate Architecture
+
+
+
+
+Architecture at a glance
+The same seven-stage shape, aimed at a different domain.
+
+
+
+ ingestion     →    extraction      →    embedding      →    correlation       →    race narrative       →   serving    →    presentation
+
+
+
+Backend: stdlib-first Python — http.server + a hand-rolled router, a hand-rolled
+WebSocket, SQLite in WAL mode, daemon-thread scheduler. No async framework, no ORM,
+no Postgres. Frontend: buildless ES modules, a hand-rolled WebGL2 renderer, no
+React/Vite/npm/CDN. The zero-install pledge carries over in full — python run.py and it's
+up, database created, sources seeded, ingestion running.
+
+  LAYER            WHAT IT OWNS
+
+  core/            Config loader, SQLite session/locking, hash-chain provenance, gazetteer
+
+  ingestion/       Scheduler + one adapter per source type (polls, FEC, Census, AP, state SoS, Congress, transcripts, news, markets, social)
+
+  modeling/        Averaging, fundamentals, ideology, forecasting, chamber simulation, correlation, volatility, second-order links, coalition detector,
+                   counterfactual, corroboration, rhetoric/NLP, race-calling, pollster ratings, redistricting fairness, the audit trail
+
+  domain/          Candidates (every historical filer), parties, races, geography (states → districts → county-equivalents → precincts) and demographics at
+                   every tier, the curated-floor + sync + AI-fill knowledge layer
+
+  analyst/         Context-pack assembly + the Ollama-first reasoning/Q&A engine
+
+  api/             Router, REST routes, WebSocket feed, static frontend serving — every read route accepts as_of
+
+  frontend/        Buildless SPA — tiered map, the client-side map builder, a global polls window, race/geography pages with electoral history, the Analyst,
+                   counterfactual UI, time capsule
+
+  scripts/         Offline boundary/redistricting build pipeline, seeds, historical backfill importers
+
+
+
+
+03 — DATA
+
+
+
+
+                                                                                3 / 40
+                                                                    PollGrid — Clean-Slate Architecture
+
+
+
+
+Domain model
+The geopolitics-knowledge-layer trick, aimed at candidates instead of countries — and
+pushed one tier deeper than GlobeGrid ever needed to go.
+
+
+
+§ Geography, five tiers deep
+Nation → State → Congressional District → county-equivalent → precinct. Every tier is a
+real, separately-modeled entity, not a label pasted onto the one above it — because the
+naming and the electoral math both genuinely change tier to tier.
+
+  TIER                   SCOPE                       WHAT'S TIER-SPECIFIC ABOUT IT
+
+
+  Nation                 1                           National polling averages, national fundamentals, the generic ballot.
+
+  State                  50 + DC + 5                 DC and the territories carry no voting House seat and are tracked for context, not electoral math. Every
+                         territories                 state row carries an elector_method field.
+
+  Congressional          435 voting + non-           Redistricting-versioned ( effective_from / effective_to ) so the 2012-cycle lines and the 2022-cycle lines
+  district               voting delegates            are genuinely different geometries, never the same shape relabeled.
+
+  County-                3,143+                      Modeled with a type field — county / parish (Louisiana) / borough & census_area (Alaska) /
+  equivalent                                         independent_city (Virginia) — never hardcoded as "county" everywhere else in the schema.
+
+  Precinct / VTD         ~170,000, coverage          Boundaries and results from VEST-style precinct projects plus county election-office GIS releases where
+                         varies by state             published. Genuinely missing in some states — flagged thin_coverage , never silently backfilled.
+
+
+
+   ELECTORAL VOTE ALLOCATION — MODELED EXPLICITLY, NEVER ASSUMED
+
+
+   48 states plus DC award electors winner-take-all at the state level. Maine and Nebraska don't — one elector per congressional district's
+   winner, plus two statewide electors for the overall state winner. This isn't a special case bolted on later: every state carries an
+    elector_method of winner_take_all or congressional_district , and the presidential model reads its electoral math off the district
+   tier for exactly those two states and off the state tier for the other 48 + DC.
+
+
+
+§ Demographics, at every tier
+The same discipline GlobeGrid applied to country stats — "sourced, never LLM-guessed" —
+applied here at five tiers instead of one. A single polymorphic demographics table (keyed by
+tier + entity + as_of ) carries every category below for the nation, every state, every
+congressional district, every county-equivalent, and every precinct coverage allows:
+
+  CATEGORY                   INCLUDES                                                                                 SOURCE
+
+
+  Population & age           Total population, voting-age population, citizen voting-age population, median age,      Census ACS / decennial
+                             age brackets
+
+  Race & ethnicity           Full Census race/ethnicity breakdown, and its trend over time                            Census ACS / decennial
+
+  Education                  Attainment brackets — less than HS, HS, some college, bachelor's+, graduate              Census ACS
+
+  Economic                   Median household income, income distribution, unemployment rate, industry mix            Census ACS / BLS
+
+  Housing &                  Homeownership rate, housing cost burden, urban/suburban/rural classification             Census ACS / USDA Rural-Urban
+  urbanicity                                                                                                          Continuum Codes
+
+  Social & nativity          Foreign-born share, language spoken at home, veteran status, disability rate             Census ACS
+
+  Political-historical       Party registration mix where states register by party, turnout rate, past results back   State voter files / the certified-results archive
+                             to 1950
+
+
+Every row carries a confidence tag, not just a value. State, district, and county-equivalent
+figures are measured — direct Census/BLS estimates. Precinct-level figures are derived
+— apportioned from Census block data by areal interpolation, since no federal agency
+publishes precinct-level demographics directly — and the UI is required to show that
+
+
+
+
+                                                                                  4 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+distinction every time it renders a precinct number, the same honesty a "thin coverage"
+badge enforces elsewhere.
+
+
+§ Races covered, for now
+President, Senate (Class I/II/III tracked), Governor, and House (435 + non-voting
+territorial delegates) — plus primaries as their own race-phase with their own candidate set.
+That's the whole scope of this build. Ballot measures and state legislative chambers are
+deliberately not in it — the schema leaves the room (a race can already be typed
+generically), but nothing ingests, models, or surfaces either until state houses are explicitly
+back in scope.
+
+
+§ Entities
+
+
+  Candidates & officeholders                          Parties                                       Money & orgs
+
+  Bio, party, current office, campaign                National committees + all 50 state            PACs, Super PACs, 527s, aggregated
+  finance summary, key positions, a                   parties, platform positions.                  disclosed donors, endorsing interest
+  deterministic ideology score — never an                                                           groups.
+  LLM guess at where someone sits on a
+  spectrum.
+
+
+
+  Media
+  Outlets carry a reliability/leaning tier,
+  same idea as GlobeGrid's source tiers
+  — feeds the media-framing matrix and
+  keeps low-signal outlets from drowning
+  out wire-quality sources.
+
+
+
+§ The three-tier acquisition pattern
+Directly lifted from GlobeGrid's country/leader/party layer, because it's the single best idea in
+that codebase — now doing double duty for candidates and for the demographic panel
+underneath them:
+
+1. Curated floor. Every sitting member of Congress, every current governor, and every
+   major-party presidential/Senate/gubernatorial candidate gets a hand-seeded row with
+   cited sources — so a candidate page is never blank on day one.
+
+2. Free structured-API sync. FEC (finance), Census (demographics at every tier),
+   Congress.gov (votes, bill sponsorship) refresh on a schedule, purely additive —
+      COALESCE -style, never overwriting a curated value, and once a sync has touched a row
+   the seed step leaves it alone.
+
+3. LLM fills the remaining gaps — bio prose, a plain-language policy-position summary, a
+   party-history paragraph — generated in the background, cached, merged over the floor,
+   never blocking a page from opening.
+
+Coverage isn't limited to the majors. Every candidate who has ever appeared on a
+general-election ballot for President, Senate, Governor, or House gets a real page — a stub
+the instant an official filing record or historical-archive import creates the row, thickening
+automatically as sync and AI-fill reach it. A losing 1962 House candidate and a sitting
+Senator both get a page; they just don't get the same depth on day one, and the page says
+so.
+
+
+
+
+                                                                          5 / 40
+            PollGrid — Clean-Slate Architecture
+
+
+
+
+04 — DATA
+
+
+
+
+                          6 / 40
+                                                           PollGrid — Clean-Slate Architecture
+
+
+
+
+Ingestion layer
+One daemon thread per source, three-state health, a budget counter for anything rate-
+capped.
+
+
+
+The scheduler spawns one daemon thread per active source and re-reads that source's own
+database row every tick, so toggling a source off or editing its poll interval takes effect on the
+next cycle with no restart. Each thread waits on a shared stop-event rather than a plain
+sleep, so shutdown is immediate. Backoff is exponential, capped at a configured ceiling,
+same as the ground rules state.
+
+
+  ingestion/pollsters/*.py                           ingestion/fec.py                                ingestion/census.py
+
+  Polling                                            Campaign finance                                Demographics
+
+  One adapter per pollster feed/API —                Contributions, independent                      ACS + decennial data per district/county
+  start with the dozen-plus highest-quality,         expenditures, committee filings straight        on its own release cadence — a
+  methodologically-transparent shops,                from the FEC API — the deterministic            fundamentals-model input, never
+  expand over time. Normalizes into one              input to the fundraising-trend signal used      guessed.
+   Poll shape: candidate, race, sample               by both fundamentals and corroboration.
+  size, margin of error, field dates,
+  population (LV/RV/A), methodology.
+
+
+
+  ingestion/ap_elections.py                          ingestion/state_sos/*.py                        ingestion/congress_gov.py
+
+  Official results                                   State certification feeds                       Legislative record
+
+  The ground-truth "sensor" — the one                One adapter per state Secretary of State        Roll-call votes, bill sponsorship,
+  feed nothing else is allowed to override,          results/certification feed — start with         committee assignments — feeds
+  and the only thing election night is               competitive-state coverage, expand              ideology scoring and the rhetoric/topic
+  allowed to call a race against.                    every cycle.                                    layer.
+
+
+
+  ingestion/transcripts.py                           ingestion/rss.py                                ingestion/markets.py
+
+  Campaign speech                                    Political news                                  Prediction markets
+
+  Official press releases, rally remarks,            Wire services and political desks,              Legal markets (Kalshi, and others as
+  debate transcripts from campaign/official          generic RSS/Atom parsing, same shape            availability allows) feeding the
+  sources only — text input to the rhetoric          as any GlobeGrid-style news adapter.            forecast/market-divergence signal.
+  NLP layer.
+
+
+
+  ingestion/social.py
+
+  Social signal
+  Low-reliability-tier volume/sentiment only
+  — never a source of fact, only of noise-
+  aware context.
+
+
+
+
+                                                                         7 / 40
+                                             PollGrid — Clean-Slate Architecture
+
+
+
+
+§ Failure isolation
+
+ OUTCOME                  HEALTH                                                   NEXT INTERVAL
+
+
+ Success                  ok , failure counter reset                               base interval
+
+ Missing API key          degraded forever                                         flat, capped — never escalates
+
+ Daily budget exhausted   ok — deliberately not a failure                          flat, capped
+
+ Any other exception      degraded , then down after N failures                    exponential, capped
+
+
+
+
+05 — DATA
+
+
+
+
+                                                            8 / 40
+                                                           PollGrid — Clean-Slate Architecture
+
+
+
+
+Ingestion, made concrete
+Real endpoints, real variable IDs, and an honest tiered strategy for official results — not
+hand-waving.
+
+
+
+§ Census, concretely
+ingestion/census.py hits the ACS 5-year endpoint —
+https://api.census.gov/data/{year}/acs/acs5?get=NAME,{variables}&for=
+{geography}&in={parent}&key={CENSUS_API_KEY} — the 5-year product, not the 1-year,
+because 1-year estimates only publish for geographies with 65,000+ population and this
+platform needs county- and district-level reliability everywhere. Geography clauses differ by
+tier exactly as the Census API requires: for=state:* , for=county:*&in=state:XX , and
+— confirmed against the real API — for=congressional%20district:*&in=state:XX for
+districts. Tract/block-group pulls ( for=tract:*&in=state:XX%20county:YYY ) are the raw
+input to the precinct-derivation step below, never queried directly by a user-facing feature.
+
+  DEMOGRAPHIC CATEGORY      REAL ACS TABLE(S)
+
+
+  Population & age           B01003 (total population), B01001 (sex by age)
+
+  Voting-age / citizen       B01001 for voting-age brackets; true CVAP is not a standard ACS Detailed Table — it comes from the Census Bureau's
+  voting-age population     separate annual CVAP Special Tabulation product, built specifically for Voting Rights Act analysis. Use that as its own
+                            ingestion path, not a B-table.
+
+  Race & ethnicity           B02001 (race alone), B03002 (Hispanic/Latino origin by race — the standard combined table)
+
+  Education                  B15003 (attainment, population 25+)
+
+  Economic                   B19013 (median household income), B19001 (income distribution), B23025 (employment status)
+
+  Housing & urbanicity       B25003 (tenure/homeownership); urban/rural classification from the Census Bureau's urban-area delineation files, not an ACS
+                            table
+
+  Social & nativity          B05002 (place of birth/foreign-born), B16001 (language at home), B21001 (veteran status), B18101 (disability status)
+
+
+
+  THE REAL VINTAGE-MISMATCH PROBLEM — AND HOW IT'S HANDLED
+
+
+  ACS congressional-district data is published against whichever Congress's boundaries were seated during the survey years — when a
+  state redraws districts mid-decade, an ACS release can reflect the prior map for a year or more before the Bureau catches up. The fix
+  isn't to ignore this: every Census pull is tagged with the specific Congress vintage it was published against, matched against the
+   congressional_districts table's own effective_from / effective_to boundary versions — a demographic row is only ever joined
+  to the district-shape version it actually describes, never silently mapped onto "whatever CD lines are current now."
+
+
+Cadence: ACS 5-year estimates refresh annually (a rolling window); the decennial count
+( dec/pl for the PL 94-171 redistricting file, dec/dhc for detailed demographic/housing
+characteristics) lands once every ten years plus the mid-decade redistricting-file release.
+Boundary geometry itself comes from TIGER/Line shapefiles (already the offline build
+pipeline's source in The map) — TIGERweb, the live map-service version of the same data,
+isn't needed since nothing here calls a live GIS service at runtime.
+
+Precinct-level derivation, named precisely: population-weighted areal interpolation —
+each Census block's population (from the decennial block-level count, the finest population
+geography that exists) is distributed into whichever precinct(s) its geometry overlaps,
+weighted by the fraction of the block's population estimated to fall in each; a precinct's
+demographic estimate is then the population-weighted sum of the blocks assigned to it. This
+is a real, named technique with well-understood error characteristics — it degrades when a
+precinct boundary splits a Census block unevenly (rare, since precincts are usually drawn
+
+
+
+
+                                                                         9 / 40
+                                                              PollGrid — Clean-Slate Architecture
+
+
+
+
+from whole blocks, but not guaranteed) — which is exactly why every precinct-level
+demographic row carries confidence=derived , never measured .
+
+
+§ FEC, concretely
+ingestion/fec.py uses the real, free, public OpenFEC API ( api.open.fec.gov ) —
+DEMO_KEY works for development at a throttled rate; a registered key raises the ceiling to
+1,000 calls/hour. Endpoints: /candidates/ and /candidate/{candidate_id}/ for the
+roster that seeds every historical and current candidate stub, /committees/ for
+PAC/campaign-committee linkage, /schedules/schedule_a/ for itemized individual
+contributions, /schedules/schedule_a/by_contributor/ for aggregated donor-side
+rollups, and /schedules/schedule_b/ for itemized spending/disbursements — the
+deterministic input to both the fundamentals model's fundraising-ratio term and the
+corroboration engine's finance signal.
+
+
+§ Congress.gov, concretely
+ingestion/congress_gov.py uses the real, free (API-key-gated) Congress.gov API for
+bills, sponsorship, and roll-call votes. Honest caveat: its House Roll Call Votes endpoint
+currently only covers the 118th Congress forward (2023–present) — it is not a full historical
+roll-call archive. For ideology scoring and roll-call history before 2023, the platform pulls from
+VoteView (Poole & Rosenthal's DW-NOMINATE project, public-domain downloads covering
+every Congress back to the 1st) — a real, load-bearing academic source rather than a gap
+papered over, and one that hands the ideology-scoring model an actual peer-reviewed
+methodology to sit on top of instead of inventing its own from scratch.
+
+
+§ Official results: the honest tiered strategy
+The single biggest access-reality gap in an earlier draft: the AP Elections API
+( developer.ap.org/ap-elections-api ) is a real commercial product requiring an
+account and a negotiated license — not a free primary source a small team simply pulls from
+on day one. Here's the honest, buildable tier structure instead:
+
+  TIER              SOURCE                                                                           WHAT IT'S ACTUALLY FOR
+
+
+  1 — native,       Each state's own results feed, for the subset of states that publish genuinely   Real-time results on election night for those
+  live              clean machine-readable results (a minority, growing slowly)                      states, ingested the instant they're posted
+
+  2—                OpenElections (co-founded 2012 by Serdar Tumgoren and Derek Willis;              The backbone of the deep historical archive and of
+  community,        standardized, versioned CSVs covering federal/statewide/state-legislative        precinct-level results generally — both projects
+  lagged            results) and VEST (University of Florida + Wichita State; the most               finalize a cycle weeks to months after election day,
+                    comprehensive precinct-boundary-plus-results database that exists, distributed   which is exactly acceptable for history but not for
+                    via Harvard Dataverse)                                                           election night
+
+  3 — AP,           The real AP Elections API, gated behind ingestion.ap_elections.enabled           Turned on only once there's budget to justify it —
+  optional          (default false )                                                                 the UI honestly labels which tier is actually live for
+  upgrade                                                                                            a given race ("results via [State] Secretary of
+                                                                                                     State" vs. "results via AP Elections"), never
+                                                                                                     implying AP-grade calling speed from a tier-1 feed
+                                                                                                     that can't deliver it
+
+
+Module structure mirrors the tiers directly: ingestion/results/tier1_native/{state}.py
+(one file per state with a real feed), ingestion/results/tier2_openelections.py (bulk-
+syncs OpenElections' tagged CSV releases and VEST's per-cycle Harvard Dataverse
+deposits), ingestion/results/tier3_ap.py (the gated, optional adapter), and
+ingestion/results/manual_entry.py — a small authenticated internal tool for the rare
+jurisdiction with no digital feed at all, every row it produces tagged source_tier=manual so
+its provenance stays visible rather than laundered to look automated.
+
+
+
+
+                                                                            10 / 40
+            PollGrid — Clean-Slate Architecture
+
+
+
+
+06 — DATA
+
+
+
+
+                          11 / 40
+                                                          PollGrid — Clean-Slate Architecture
+
+
+
+
+Extraction & the fact chain
+Polls parse directly. Text gets NLP. Everything gets hash-chained before it's ever stored.
+
+
+
+Polls need no NLP at all — they parse straight into a structured polls fact. News,
+speeches, and transcripts go through: entity recognition (spaCy if installed, a deterministic
+capitalized-run regex fallback otherwise — the same auto-detect-with-fallback idiom as every
+other optional dependency in this design); a politics-tuned category classifier ( polling /
+finance / legislation / endorsement / scandal / debate / election-result /
+rhetoric / campaign-event , word-boundary keyword matching with a fixed tie-break
+order so "war on drugs" doesn't trip a conflict keyword); entity canonicalization (candidate
+and party name variants resolved via exact-alias cache, then fuzzy match, so "Gov. Whitmer"
+and "Gretchen Whitmer" and "Whitmer" collapse to one canonical id); gazetteer geocoding to
+county/district (dateline first, a curated notable-places override for newsworthy-but-small
+locales, then a Census-Gazetteer-derived place list); and a hash-chain provenance stamp
+computed before insert.
+
+Nothing in extracted_facts or polls is ever deleted. That table is the permanent record
+the 1950-archive and the time-capsule scrubber both read from.
+
+
+
+07 — INTELLIGENCE
+
+
+
+
+                                                                        12 / 40
+                                                          PollGrid — Clean-Slate Architecture
+
+
+
+
+The intelligence engine
+Deterministic math for anything that gates a claim. The model only ever narrates.
+
+
+
+§ The deterministic core
+
+
+  Poll averaging                                    Fundamentals model                            Ideology scoring
+
+  Recency-weighted, house-effect-                   Incumbency, generic-ballot lean,              A deterministic proxy from roll-call votes,
+  adjusted, sample-size-weighted — every            economic indicators, partisan lean (a         donor patterns, and public position
+  weight config-driven, zero LLM                    computed PVI-style score), fundraising        statements scored against a fixed rubric.
+  anywhere near it.                                 ratio — a weighted composite, not a
+                                                    model's opinion.
+
+
+
+  Volatility index
+  0–100 composite of poll-movement
+  magnitude, cross-pollster spread, and
+  news volume; z-score plus a CUSUM
+  chart catch a real swing versus noise,
+  same technique as an instability index
+  built for conflict data, retargeted at a
+  polling average.
+
+
+
+§ The forecast, and its gate
+Forecasting sits on top of the averages and fundamentals, itself deterministic — but a race-
+type only earns visible forecasts after a nightly backtest, replayed against the archive back
+to 1950, clears a Brier-score ceiling over a minimum number of graded past predictions. That
+backtest is pure SQL and arithmetic, deliberately not an LLM: no peeking at outcomes that
+haven't happened yet in the replay, no hindsight. The scorecard shows every race-type's
+track record, including the ones still failing — the same "the honesty is the moat" principle a
+serious forecasting product has to earn, not assert.
+
+
+§ Race narrative generation
+One LLM call per race-cluster update: a strict JSON contract — what_changed ,
+why_it_might_have_changed (grounded in cited facts, never invented), what_to_watch ,
+confidence . Malformed output gets exactly one retry, then a deterministic templated
+summary built straight from the numbers. A devil's-advocate pass may only lower stated
+confidence, enforced by a rank comparison in code — never by trusting the model's own
+claim.
+
+
+§ Beyond the primary narrative
+
+
+  Second-order links                                Counterfactual engine                         Demographic coalition detector
+  Two races moving together with no                 "What if this candidate drops out," "what     Deterministic regression across the
+  obvious shared cause get flagged for a            if turnout matches 2020 instead of 2016"      demographic panel at whatever tier a
+  plausible-common-cause check — a                  — branches grounded via full-text             race lives in — which variables
+  fundraising surge in one district and a           search against the 1950-present archive,      (education mix, age structure, urbanicity,
+  poll shift in a neighboring one, say.             each carrying a precedent count from          income) explain the most movement
+
+
+
+
+                                                                        13 / 40
+                                                     PollGrid — Clean-Slate Architecture
+
+
+
+
+                                               real past cycles, honest non-summing        over the last several cycles. The number
+                                               probabilities, deepen-on-demand rather      comes from statistics; only the plain-
+                                               than generated to full depth up front.      English explanation of it comes from the
+                                                                                           Analyst.
+
+
+
+  Corroboration                                Rhetoric & framing                          Election night
+
+  A poll's implied direction checked against   A fixed policy-topic taxonomy, stance       AP and state feeds drive a deterministic
+  signals a model can't hallucinate: FEC       classification per topic (rubric-            CALLABLE flag — margin versus
+  fundraising trend, campaign-event            constrained LLM with a deterministic        estimated remaining vote, informed by
+  frequency, ad-spend trend, voter-            keyword fallback), and a media-framing      historical county-reporting curves — that
+  registration change, early-vote request      matrix comparing how differently-leaning    a human, and only a human, turns into a
+  volume. Agreement across                     outlets cover the identical story.          call.
+  independently-sourced channels raises
+  a corroboration badge on the race page.
+
+
+
+
+08 — INTELLIGENCE
+
+
+
+
+                                                                   14 / 40
+                                                             PollGrid — Clean-Slate Architecture
+
+
+
+
+The genius layer: quantitative × qualitative
+How PollGrid gets smarter than a poll average without ever letting the model touch a
+number.
+
+
+
+Every existing aggregator leaves the same thing on the table. RealClearPolitics-style sites
+average and stop. 538-style forecasters blend polls with fundamentals — genuinely
+quantitative, but structurally blind to everything that hasn't shown up in a poll yet: a scandal
+breaking this morning, a coalition visibly cracking in coverage, a challenger's debate
+performance landing badly. 270ToWin has no model at all. The obvious fix — "ask an LLM
+who's going to win" — is exactly what this project's own hard rule forbids, and for good
+reason: it would produce an unaccountable black box no more trustworthy than a pundit's
+gut, just faster.
+
+The actual fix is a pipeline, not a shortcut.
+
+
+§ Step one: the Qualitative Factor Scorecard
+Every race carries a fixed, named vector of scores — one per factor in the factors taxonomy
+— re-scored by the LLM only when new relevant facts land for that race, cached otherwise.
+Every score is numeric or ordinal, every score is cited back to the specific ingested fact(s)
+that justified it, and the scoring runs against a fixed rubric per factor (never open-ended
+"what do you think happens here"). If no LLM is available, every LLM-scored factor defaults
+to a neutral 0 — the scorecard degrades to "quantitative-only," never blocks, never guesses.
+This is a strict generalization of the causal-narrative pattern already established elsewhere in
+this design: same one-call-per-update discipline, same cited-and-cached rule, same
+deterministic neutral fallback.
+
+
+§ Step two: a real, named, auditable combination
+The Qualitative Factor Scorecard becomes plain numeric features — nothing more — fed
+into a penalized logistic regression (elastic-net) stacking model alongside the existing
+deterministic quantitative layer: the poll-average-plus-fundamentals blend's own probability,
+and the demographic coalition detector's output. This is a real, well-understood statistical-
+learning technique (a meta-learner over interpretable base predictions, the same family of
+idea behind any serious ensemble forecast) — chosen specifically because elastic-net
+regularization shrinks a factor's fitted weight toward zero if it isn't actually earning its keep,
+rather than a human having to hand-prune a factor that "should" matter but doesn't. The
+model itself is refit against the historical archive using the same replay-based
+backtest machinery that already gates the quantitative-only forecast — no LLM
+anywhere near the fitting process, no hindsight, coefficients stored as plain data and fully
+inspectable.
+
+
+§ Step three: it has to earn the right to be shown — against its own baseline
+
+   THE RULE THAT KEEPS THIS HONEST
+
+
+   A qualitative-augmented forecast for a given race-type category is only ever shown live if it beats the quantitative-only baseline's
+   Brier score in the same nightly backtest that already gates every forecast category. The platform is not allowed to prefer the more
+   impressive-sounding model — only the one that's demonstrably more calibrated, category by category. If the qualitative layer doesn't
+   earn its keep for, say, gubernatorial races, gubernatorial forecasts simply run quantitative-only until it does. As more graded Factor-
+   Scorecard-to-outcome pairs accumulate in the historical archive, the elastic-net weights refit periodically and the model can genuinely
+   get more accurate over time — real statistical learning from a growing track record, not a vague claim that "the AI learns."
+
+
+
+
+                                                                           15 / 40
+                                                           PollGrid — Clean-Slate Architecture
+
+
+
+
+§ Why this is a structural advantage, not a marketing claim
+No existing aggregator does this end to end. 538-style models are quantitative-only by
+construction — qualitative judgment enters, if at all, as an analyst's ad hoc adjustment, not a
+systematized, cited, backtested pipeline running across every tracked race. RCP-style sites
+don't model at all. 270ToWin has no forecast, only a canvas for the user's own assumptions.
+The novel mechanism here isn't "an LLM helps predict elections" — it's that the LLM's only
+job is turning an ocean of unstructured text into structured, cited, rubric-scored data at a
+scale no team of human analysts could sustain across hundreds of races simultaneously,
+and a transparent, refittable, backtested statistical model does the actual predicting on top of
+it.
+
+
+
+09 — INTELLIGENCE
+
+
+
+
+                                                                         16 / 40
+                                                          PollGrid — Clean-Slate Architecture
+
+
+
+
+The factors taxonomy
+Every qualitative factor the Scorecard tracks, its real grounding, and exactly how it's
+measured.
+
+
+
+Every row below states plainly whether it's computed deterministically from data already in
+the schema, or LLM-rubric-scored from text against a fixed scale — nothing is left
+ambiguous about which.
+
+
+  GIVEN EXTRA DEPTH, ON REQUEST: GENERATIONAL COHORTS
+
+
+  Grounded in Mannheim's political-generations theory — the political events of one's formative years leave a durable imprint on lifelong
+  partisan lean — and in generational replacement, one of the best-documented drivers of long-run partisan change in the discipline: as
+  older cohorts are replaced by younger ones at the ballot box, the electorate's aggregate lean shifts even if no individual voter changes
+  their mind. The platform tracks named cohorts (Silent, Boomer, Gen X, Millennial, Gen Z) by their real, distinct turnout propensities, issue
+  priorities, and media-consumption patterns, computed straight from the age-bracket columns already in the demographics table — and
+  maintains a generational-replacement index per geography: the trend in post-Boomer share of the electorate over successive cycles,
+  a deterministic leading indicator of long-run drift, tracked separately from any single-cycle factor below.
+
+
+
+
+                                                                        17 / 40
+                                                             PollGrid — Clean-Slate Architecture
+
+
+
+
+FACTOR FAMILY                      REAL GROUNDING                                           MEASUREMENT
+
+
+Retrospective / economic           Fiorina's retrospective-voting theory                    Deterministic (real income/unemployment/inflation trend) +
+voting                                                                                      LLM-rubric (perceived-economy sentiment, which can diverge
+                                                                                            from the raw indicator)
+
+Anti-incumbency / time-for-        Abramowitz-style structural midterm models; the          Deterministic formula on incumbency + midterm-cycle position
+change                             president's-party midterm penalty, the "six-year         + approval trend
+                                   itch"
+
+Generational cohorts &             Mannheim's political generations; generational           Deterministic composition + trend (see callout above)
+replacement                        replacement theory
+
+Realignment / secular partisan     V.O. Key's critical-elections theory; Sundquist's        Deterministic — long-run partisan-lean trend line per geography
+change                             realignment framework
+
+Valence & candidate quality        Stokes' valence-politics concept                         LLM-rubric — competence/authenticity narrative scored from
+                                                                                            coverage and debate transcripts
+
+Coattail / reverse-coattail        Down-ballot correlation with top-of-ticket               Deterministic — statistical correlation across same-cycle race
+effects                            performance                                              results
+
+Intra-party ideological factions   Factional-politics research on primary vs. general       Deterministic clustering (ideology scores, primary vote share) +
+                                   electorates                                              LLM-rubric (which faction holds the "center of gravity" in current
+                                                                                            coverage)
+
+Political geography                Elazar's political-culture regions; urban-rural          Deterministic — urbanicity classification + migration/population-
+                                   polarization; Bishop's "Big Sort"                        change trend
+
+Religious/denominational blocs     Denominational voting-bloc research (explicitly not      Deterministic composition from Pew Religious Landscape
+                                   treated as monolithic)                                   estimates (a distinct, honestly-cited source — Census doesn't
+                                                                                            ask religion) + LLM-rubric for narrative salience only
+
+Ethnic/community voting            Voting-bloc research, with the same explicit non-        Deterministic composition (race/ethnicity) + LLM-rubric for
+patterns                           monolithic caution (e.g. Latino voters vary by           coverage salience only, never for assuming a bloc's vote
+                                   national origin, generation, religiosity)
+
+Socioeconomic / "diploma           Class-based educational realignment research             Deterministic — education/income composition trend
+divide"
+
+Candidate charisma /               Valence-politics candidate-quality research              LLM-rubric — tone/authenticity scoring from debate and
+personality                                                                                 interview coverage
+
+Scandal typology & survival        Scandal-typology and political-survival research         LLM-rubric classifies type/severity; deterministic lookup then
+base rates                                                                                  matches it against real historical base rates for that scandal
+                                                                                            type from the archive
+
+Down-ballot / ticket-splitting     Split-ticket voting research                             Deterministic — historical ticket-splitting rate per geography
+propensity                                                                                  from political_history
+
+Turnout / ground-game quality      Mobilization and GOTV research                           LLM-rubric (field-office/GOTV mentions in coverage) +
+                                                                                            deterministic (early-vote request trend)
+
+Domestic policy success/failure    Retrospective/performance voting, applied to             LLM-rubric — salience/sentiment tied to Congress.gov bill-
+                                   legislative outcomes                                     status ingestion
+
+Foreign policy impact              Rally-round-the-flag and war-fatigue research            LLM-rubric — crisis salience and approval-direction scoring, a
+                                                                                            real but typically short-lived effect
+
+Financial/market impact            Markets as a political-signal channel                    Deterministic — the existing market-reaction ingestion,
+                                                                                            formalized as its own factor
+
+Tech/media-environment             Algorithmic-amplification and virality research          LLM-rubric — narrative-virality and disinformation-risk scoring,
+impact                                                                                      used only to flag, never to suppress
+
+Redistricting/competitiveness      Gerrymander-competitiveness research                     Deterministic — the efficiency-gap/mean-median fairness
+                                                                                            scores (Ahead of everything else) feed straight in
+
+Weather-and-turnout effects        Documented election-day weather/turnout                  Deterministic — historical NOAA weather data correlated
+                                   correlation research                                     against turnout deltas
+
+Third-party / spoiler dynamics     Spoiler-effect research in close races                   Deterministic — third-party polling share against historical
+                                                                                            spoiler base rates at similar margins
+
+Open-seat vs. incumbent-           Open-seat competitiveness research                       Deterministic categorical flag with its own historically-calibrated
+defended                                                                                    base-rate adjustment
+
+Endorsement cascades               Endorsement-effect research                              Deterministic, weighted by a curated endorser-prominence
+                                                                                            score; the backtest determines which endorsement types
+                                                                                            actually correlate with movement
+
+
+
+
+                                                                            18 / 40
+                                                     PollGrid — Clean-Slate Architecture
+
+
+
+
+Every one of these lives in code as modeling/factors_taxonomy.py (the fixed rubric
+definitions) and qualitative_factor_scores (the scored, cited, cached data rows) — see
+Schema & configuration.
+
+
+
+10 — INTELLIGENCE
+
+
+
+
+                                                                   19 / 40
+                                                           PollGrid — Clean-Slate Architecture
+
+
+
+
+The Analyst
+Ollama-powered, fed automatically by every demographic and historical fact the
+platform holds — reasoning, not inventing.
+
+
+
+This is the "predictive genius" layer, and it's built the way GlobeGrid's grounded Q&A analyst
+was built: the model never gets to make a number up, because it never has to — it's handed
+a fully-assembled, cited context bundle before it writes a word. Ask it "why is this district
+tightening" or "what does the demographic trend in this county actually predict" and it
+reasons over real data, not vibes.
+
+Ollama, local, by default. The same model already running on your machine drives race
+narratives, dossier synthesis, and every Analyst answer, with cloud providers wired in only as
+an optional fallback if Ollama isn't reachable. Nothing about the "genius" experience requires
+an API key or a monthly bill.
+
+
+§ How the context gets assembled — automatically
+Every sync job that lands new Census, FEC, Congress.gov, or certified-results data doesn't
+just update a table — it invalidates the standing context pack for every geography and race
+it touches, but does not eagerly rebuild it. A context pack is a deterministically-built bundle:
+the full demographic profile at every tier from precinct up through state, the historical result
+and turnout trend where it exists, the current poll average, fundamentals snapshot, and
+Qualitative Factor Scorecard (The genius layer), the fundraising trend, and any tagged
+rhetoric/news facts — everything the Analyst is allowed to reason over, nothing it has to
+guess. No LLM call happens until this bundle exists; if a tier's data is thin, the bundle says so
+honestly instead of the model quietly filling the gap.
+
+
+§ Sized for a real machine, not a hypothetical one
+Default model: Qwen3-30B-A3B-Instruct — a mixture-of-experts model with 30.5B total
+parameters but only 3.3B active per token, meaning it runs at roughly 8B-class speed on
+ordinary hardware despite its 262K-token context window, which is exactly the "large context,
+still fast locally" combination this feature needs. Constrained-hardware fallback: Qwen3
+14B at 128K context, for machines without much RAM to spare. Optional heavy upgrade:
+Llama 3.3 70B, for anyone running a Mac Studio or a dual-GPU rig who wants the strongest
+reasoning available locally. All three are real, current Ollama-pullable models — this isn't
+aspirational.
+
+A context pack targets roughly 28,000–32,000 tokens — nowhere near any of the three
+models' actual context ceilings, deliberately, because stuffing a window to its limit adds
+latency and measurably dilutes attention quality even on long-context models. Budgeted
+roughly as: demographics across the relevant tiers plus comparison baselines (~4,000
+tokens), historical trend (~4,000), current polling/fundamentals/forecast snapshot (~3,000),
+the Qualitative Factor Scorecard (~2,000), tagged news/rhetoric facts (~10,000 — the largest
+single allocation, and the one most likely to overflow), leaving headroom for conversation
+history and generation. When tagged facts alone would exceed their budget, the named
+policy is relevance-ranked truncation: facts are pre-scored by the same embedding-
+similarity mechanism the correlation engine already runs, the highest-relevance facts within
+budget are kept, and recency is the tiebreak only among facts of similar relevance — never a
+blind first-N or last-N cutoff.
+
+Concurrency: Ollama serves one generation at a time per loaded model, so the real design
+problem is queueing, not parallelism. A two-lane priority queue solves it: interactive requests
+
+
+
+                                                                         20 / 40
+                                                             PollGrid — Clean-Slate Architecture
+
+
+
+
+(a live user mid-conversation with the Analyst) always preempt background requests (a
+context-pack rebuild), never the other way around. The rebuild-storm scenario a nightly sync
+could otherwise cause — tens of thousands of precincts all invalidated at once — never
+materializes in the first place, because rebuilds are lazy, not eager: invalidating a context
+pack only marks it stale; it's actually rebuilt the next time someone (a user or another feature)
+asks about that specific entity, and cached from then on. A precinct nobody has looked at
+simply stays stale and unbuilt indefinitely, at zero cost.
+
+
+§ What it can actually do
+
+
+  Grounded Q&A                                        Demographic deep-dive                          Historical-analog reasoning
+
+  Free-text questions about any race,                 Full profile of any precinct, county,          "Which past races looked like this one"
+  candidate, or geography, answered from              district, or state, plus how its               — pulled from the correlation engine's
+  that entity's context pack with inline              demographic trajectory compares to its         historical-analog match against the
+  citations back to the specific poll, filing,        state and national baseline.                   archive back to 1950, narrated with the
+  or demographic figure used.                                                                        actual outcome each time.
+
+
+
+  Predictive read, clearly labeled
+  A plain-language synthesis of what the
+  deterministic forecast, the fundamentals,
+  the coalition detector, and the Qualitative
+  Factor Scorecard are jointly pointing at
+  — always followed by the real probability
+  number, never replacing it.
+
+
+
+   WHY THIS ISN'T THE SAME THING AS LETTING THE MODEL FORECAST
+
+
+   The Analyst can hold more demographic and historical detail in a single answer than a human analyst could hold in their head — that's
+   the genius part. What it can't do is move a single probability, average, or call by itself: every number in its context pack was computed
+   before it was ever handed to the model, and every number it repeats back has to match what's already stored. It reasons brilliantly about
+   facts it's forbidden to invent.
+
+
+
+
+11 — INTELLIGENCE
+
+
+
+
+                                                                           21 / 40
+                                                               PollGrid — Clean-Slate Architecture
+
+
+
+
+The LLM boundary
+Stated once here, then enforced file by file everywhere it's used.
+
+
+
+   ALLOWED
+
+
+   Race-narrative prose (grounded, cited, never a call) · candidate/party dossier synthesis (background, cached, always over a curated
+   floor) · rhetoric/topic-stance classification inside a fixed rubric · media-framing summaries · briefings · the Analyst's grounded Q&A and
+   predictive reasoning · counterfactual branch narrative (each branch still scored by a deterministic precedent count) · Qualitative Factor
+   Scorecard scoring — always against the fixed taxonomy, always cited, and the score itself is just a data row until the deterministic
+   ensemble touches it.
+
+
+
+   NEVER ALLOWED, UNDER ANY CIRCUMSTANCE
+
+   Poll averaging · the fundamentals model · ideology scoring · forecasting math · the elastic-net weights that combine the Factor Scorecard
+   into a probability · the Brier backtest that gates forecasts · correlation thresholds · the volatility index · anomaly detection · the race-
+   calling decision itself.
+
+
+Provider chain: local Ollama first (free, private, no rate limit), cloud providers as automatic
+fallback behind it. Background jobs skip a rate-limit cooldown instantly rather than competing
+with a live user request for quota. Every generative feature ships a fully-specified, non-
+blocking deterministic fallback — a null narrative with confidence forced low, an honestly-
+labeled non-AI counterfactual tree, a structured bulleted briefing — and the pipeline actually
+exercises that fallback path, not just handles it in theory.
+
+
+
+12 — EXPERIENCE
+
+
+
+
+                                                                             22 / 40
+                                                                PollGrid — Clean-Slate Architecture
+
+
+
+
+The map
+The same hand-rolled WebGL2 technique, the same tier system, aimed at counties
+instead of countries.
+
+
+
+Tier 1 is a genuine 3D sphere rendered in raw WebGL2 — no three.js — defaulting to a
+locked, US-centered orthographic view with the rest of Earth rendered dim and non-
+interactive purely for visual context. Day/night terminator, city lights over population centers,
+cinematic fly-to camera between states and districts, particle-trail "correlation threads" linking
+related race-dynamics events (a fundraising spike and a poll swing in the same race, say) —
+the identical visual language that makes a conflict map feel alive, aimed at a district instead
+of a warzone.
+
+
+§ Zoom LOD
+
+
+  National                                              State                                           County-equivalent
+
+  50 states + DC, generalized boundaries,               Counties (and parish/borough                    Precinct/VTD detail where a state
+  statewide poll averages and forecast                  equivalents) resolve, congressional             actually publishes it — best-effort,
+  shading.                                              districts toggle on as an independent           honestly flagged thin_coverage where
+                                                        overlay layer since district lines cut          it doesn't, exactly like a "thin coverage"
+                                                        across county lines.                            badge on a sparse data region.
+
+
+
+  Historical
+  Congressional district lines are
+  redistricting-versioned with
+   effective_from / effective_to ; the
+  time-capsule scrubber can show the
+  2012-cycle map and the 2022-cycle map
+  as genuinely different geometries, not
+  the same lines relabeled.
+
+
+
+§ Thematic modes & Election Night Mode
+Choropleth modes: partisan lean (a computed PVI-style metric, never LLM-guessed), and —
+at whichever tier is on screen — any single demographic layer on its own: education
+attainment, race/ethnicity composition, median household income, age structure, urbanicity,
+foreign-born share. Plus polling average by race, forecast probability, the volatility index,
+turnout/early-vote intensity, fundraising density, ad-spend density. Election Night Mode is
+the War Mode trick pointed at a race instead of a conflict: click a contested race, the camera
+flies to the state or district's bounding box, counties fill in live as AP/state results certify, the
+feed splits into results/turnout/fundraising/media tabs, and the UI carries a visibly distinct
+state for CALLABLE — awaiting human review versus CALLED by [named human] — the
+human-only rule enforced visually, not just in the backend.
+
+
+§ Offline build pipeline
+Census TIGER/Line shapefiles (states, counties, congressional districts, VTDs where
+published) pulled once, simplified with Douglas-Peucker and quantize-then-polyline-encoded
+exactly like a boundary pipeline built for a whole planet — vendored as static frontend data
+
+
+
+
+                                                                              23 / 40
+                                                       PollGrid — Clean-Slate Architecture
+
+
+
+
+plus a self-contained backend point-in-polygon twin, so reverse-geocoding a poll or a news
+item to its county needs zero GIS dependency at runtime, ever.
+
+
+
+13 — EXPERIENCE
+
+
+
+
+                                                                     24 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Build-your-own map
+The 270ToWin move, done on the same renderer that runs the live map.
+
+
+
+Pick a race type and a cycle — Presidential, Senate, Governor, or House — and every unit
+on the map becomes clickable through a full outcome gradient: Safe / Likely / Lean for each
+party, Tossup, or Other, the same confidence language a real forecast uses. Click a state, a
+Senate seat, or a House district and it cycles; the topline number — 270 electoral votes, 51
+Senate seats, 218 House seats — recomputes live, in plain arithmetic, off whatever's been
+assigned so far.
+
+
+§ Scoped to how each office actually works
+
+
+  Presidential                                        Senate                                        House
+
+  State-by-state, except Maine and                    Only the seats actually up that cycle are     All 435 districts are toggleable,
+  Nebraska, which the tool splits by                  toggleable; the rest display fixed at their   defaulting to the competitive ones
+  congressional district plus the two                 current holder, exactly like a real Senate    expanded and the safe ones collapsed
+  statewide electors — the same                       map has to.                                   to their projected holder, so the tool is
+   elector_method field the live model                                                              usable without scrolling past 400 non-
+  reads, so a scenario is never wrong                                                               competitive seats first.
+  about how those two states actually
+  work.
+
+
+
+  Governor
+  Every state with a race that cycle,
+  nothing else.
+
+
+
+§ Redistricting-aware, by construction
+Build a scenario for a past cycle and the tool pulls that cycle's actual district lines from the
+same boundary-versioning system the live map uses — a 2012 what-if map is drawn on
+2012 lines, not today's, because the two are genuinely different shapes.
+
+
+§ Saving & export — entirely client-side
+No account, no server round-trip, no new database table: a scenario is a compact per-unit
+outcome list that fits in a URL — and the math behind "fits" is worked out, not assumed.
+Each unit's outcome is one of eight states (Safe/Likely/Lean for each party, Tossup, or Other)
+— exactly 3 bits. The stress case is House: 435 districts × 3 bits = 1,305 bits ≈ 164 bytes;
+add a 4-byte header (schema version, race type, cycle year) and base64url-encode the
+result — ⌈168÷3⌉×4 = 224 characters . That's the whole payload, comfortably inside any
+browser or server's practical URL-length ceiling with room to spare; President, Senate, and
+Governor scenarios are all under 60 units and encode to well under 30 characters. Saving
+locally works the same way GlobeGrid's camera bookmarks do — named, dated, kept in the
+browser, switchable between several at once. Sharing is a permalink carrying that exact
+encoded string. Exporting reuses GlobeGrid's snapshot trick exactly: crop the live renderer's
+own canvas, composite a title/legend/totals panel directly onto it, and download a PNG with
+zero server involvement — plus a plain CSV/JSON export of the raw assignments for anyone
+who wants to analyze it elsewhere.
+
+
+
+
+                                                                          25 / 40
+                                                       PollGrid — Clean-Slate Architecture
+
+
+
+
+  DIFF AGAINST THE MODEL
+
+
+  An optional overlay compares a saved scenario to the platform's own live deterministic forecast and highlights exactly which units were
+  called differently — a fast way to see where your assumptions and the model's actually disagree, unit by unit.
+
+
+
+
+14 — EXPERIENCE
+
+
+
+
+                                                                     26 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Polls, everywhere
+One global window to browse every poll ever ingested — and the same data waiting on
+whatever entity you're already looking at.
+
+
+
+A dedicated Polls window lists every individual poll the platform has ever ingested, filterable
+by race type, state or district, pollster, date range, sampled population (likely voters /
+registered voters / adults), and disclosed methodology. Every row carries the pollster's field
+dates, sample size, margin of error, topline numbers, the house-effect-adjusted number
+actually used in the average, and a direct link back to the pollster's own release — never a
+paraphrase, consistent with the primary-source rule everywhere else in this build.
+
+The same list is embedded, pre-filtered, wherever it's relevant: open a state and see its
+Senate, Governor, and Presidential-in-that-state polls right there; open a House district and
+see that race's polls; open the national view and see the generic ballot. Nothing is hidden
+behind a separate tab you have to know to look for.
+
+
+   A POLL BELONGS TO THE RACE IT WAS FIELDED FOR, NOT TO A CLICK
+
+
+   Pollsters field surveys at the national, state, or district level — essentially never the county level, and the platform doesn't pretend
+   otherwise. Open a county page and you'll see the state's and district's polls that cover it, clearly labeled at that scope, with one click up
+   to the full list for the broader race — never a fabricated "county poll" that was never actually taken.
+
+
+Every pollster carries a transparent accuracy grade (detailed in Ahead of everything else)
+right next to its name in every list — so a reader can see at a glance whether a headline-
+grabbing outlier poll comes from a shop with a strong track record or a thin one.
+
+
+
+15 — EXPERIENCE
+
+
+
+
+                                                                          27 / 40
+                                                             PollGrid — Clean-Slate Architecture
+
+
+
+
+Articles, everywhere
+The news feeder doesn't wait for coverage to arrive — it goes and finds it, race by race,
+candidate by candidate.
+
+
+
+A generic RSS firehose (Ingestion layer) will always miss the long tail — down-ballot House
+coverage, local-outlet reporting on a competitive statewide race, anything no national wire
+happens to pick up. Nobody curates a feed for "every article about NC-13." So PollGrid
+doesn't rely on one: it actively hunts.
+
+
+§ The race search profile
+Every tracked race carries a search profile, built the moment the race is seeded and kept
+current automatically: race-name variants (the official name, common shorthand, "{state}
+{office} race," "{state} {office} election {cycle}"), election-cycle tags, and every candidate's
+name variants — full legal name, common nickname, title-plus-surname ("Sen. Ossoff"), and
+alias forms pulled straight from FEC filing name variants. The moment a new candidate's
+official filing record lands — FEC or state SoS — their names are added to the profile
+automatically. A candidate gets searched for from the instant they're a real filer, not once
+they're already famous enough for a generic feed to stumble onto.
+
+
+§ Retrieval — deliberately not GDELT
+GDELT is excluded on purpose. GlobeGrid's own history is the reason why — it was retired
+after reportedly "trashing the system" with low-quality volume, and that lesson carries straight
+over. The default, free, keyless mechanism is per-query Google News RSS
+( news.google.com/rss/search?q={query} ) run on the same interval discipline as any other
+source; a real commercial News API is wired in as an optional paid upgrade, mirroring the
+exact same free-first/paid-upgrade shape already used for Ollama-vs-cloud and native-
+feeds-vs-AP.
+
+
+§ Dedup, relevance, and not becoming spam
+Targeted-search hits land in the same raw_items table under the same
+UNIQUE(source_id, external_id) dedup as the generic firehose, so an article both paths
+find isn't double-counted — it just carries a matched_profile_id marker recording which
+race/candidate profile(s) matched, for traceability (one article can legitimately match several,
+e.g. two candidates in the same debate story). Nothing is filtered pre-ingestion on a
+relevance guess; instead, every hit flows through the identical extraction/correlation pipeline
+as everything else, and a genuinely irrelevant hit simply fails to correlate strongly and fades
+out of relevance-ranked views on its own. A profile whose query returns nothing for a stretch
+is logged and health-tracked exactly like a quiet source elsewhere in this design — never
+retried in a tight loop.
+
+
+§ On every race and candidate page
+An Articles panel — the same "everywhere" pattern as polls — sits on every race, candidate,
+and party page, pre-filtered to that entity, sorted by recency or relevance, each row showing
+the outlet, its reliability tier, and a direct link, never a paraphrase. Route:
+/api/articles/{entity_type}/{id} .
+
+
+
+
+16 — EXPERIENCE
+
+
+
+
+                                                                           28 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Electoral history & the archive
+Click a county, and it doesn't just show today's number — it shows every election it's
+ever been part of.
+
+
+
+Every geographic entity — a state, a congressional district, a county-equivalent, a precinct
+where coverage allows — carries an Electoral History panel: every applicable race type,
+every past cycle, margin, turnout, and swing from the prior cycle, plotted as a simple
+deterministic trend. A state shows President by cycle plus both Senate classes plus
+Governor. A district shows House by cycle. A county shows how it voted in every race that
+touches it.
+
+
+§ Boundary-aware, not boundary-blind
+Congressional districts get redrawn. A district's history panel makes that visible instead of
+hiding it — a result from before a redistricting cycle is shown as belonging to that version of
+the district's geometry, with a clear marker at every redraw, never silently spliced onto
+today's lines as if the same label meant the same shape a decade earlier.
+
+
+§ How deep the import actually goes
+Stated per office, honestly, rather than one flat cutoff year — because the truth is different for
+each one:
+
+  OFFICE       IMPORT DEPTH                                THE HONEST CAVEAT
+
+
+  President    Electoral votes & state popular vote from   1789–~1820 is flagged distinctly: many state legislatures chose electors directly rather than
+               1789                                        holding a popular vote. A clean statewide popular-vote series is reliable from 1824 forward.
+
+  Senate       Direct-election results from 1913/1914      Appointments and special elections are their own tagged event type, never presented as an
+               (the 17th Amendment)                        ordinary cycle.
+
+  House        District-level results as far back as a     Strong and standardized from the mid-1970s forward; earlier cycles are imported where digitized
+               boundary-matched crosswalk exists           sources exist and confidence-tagged accordingly, never smoothed to look uniformly complete.
+
+  Governor     Each state's own record                     Same confidence-tagging discipline as the rest — a thin or uncertain row says so.
+
+
+Every historical row carries a confidence tag applied once, at import time, and never
+upgraded retroactively just because a cleaner number would look better — the same
+provenance discipline GlobeGrid built for its own 1945-forward archive, run here across a
+genuinely longer and messier historical record.
+
+
+
+17 — EXPERIENCE
+
+
+
+
+                                                                          29 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Frontend & UI
+Buildless, themeable, and genuinely sound-designed — the "coolness" part.
+
+
+
+No React, no Vite, no npm, no CDN — native ES modules, a plain state object, a fixed bag
+of callback closures standing in for dependency injection, UI components as plain classes
+instantiated once and mutated directly. The same three-tier renderer (WebGL2 globe → 2D
+canvas → list) with a one-shot capability check, a manual override, and a graceful step-down
+if a tier's constructor ever throws. A single left-docked sliding pane hosts every detail view —
+race, candidate, party, geography at any tier — with real navigation history. A command
+palette (Ctrl/Cmd+K) jumps to any race, candidate, or geography by name. The live feed
+pushes correlated story clusters over a hand-rolled WebSocket, never raw articles, with a
+REST-polling fallback if the socket drops. The time-capsule scrubber replays the live feed
+and map for any moment since ingestion began; browsing a race's full electoral history
+further back than that is the archive's job, described above, not the scrubber's.
+
+
+§ Themes
+A handful of genuinely distinct palettes, each deriving the map's entire color treatment from
+one accent variable — no per-theme renderer color table to maintain. Deliberately no
+default red-vs-blue partisan skin: a neutral graphite-and-brass default (the identity of this
+very document), a "Broadcast Night" theme evoking election-night TV graphics, a light
+"Newsroom" mode, and a high-contrast/colorblind-safe mode.
+
+
+§ Sound
+Real Web Audio synthesis, not sample playback — an in-browser convolution reverb,
+composable presets, proper ADSR envelopes — ambient tone and tempo tracking the
+volatility index the way an earlier design tracked a conflict-instability score, plus distinct
+chimes for a poll movement, a breaking-news item, and a race call landing.
+
+
+
+18 — DIFFERENTIATORS
+
+
+
+
+                                                                          30 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Ahead of everything else
+Not by copying what RealClearPolitics, 270ToWin, Silver Bulletin, and Ballotpedia each
+do well — by making every one of those a byproduct of the same fact chain instead of
+five disconnected tools.
+
+
+
+
+  Qualitative signal, systematized                 Coverage that hunts, not waits                     Chamber-control simulation
+
+  The genius layer extracts cited, rubric-         Targeted search profiles per race and              A Monte Carlo run across every
+  scored qualitative factors — two dozen           candidate actively find down-ballot and            individual race's own deterministic
+  and counting — from the full information         local coverage a generic firehose would            probability distribution, respecting cross-
+  environment at a scale no analyst team           simply never surface.                              race correlation — a national-
+  could sustain, then lets a backtested                                                               environment shock moves similar seats
+  statistical model, never the LLM itself,                                                            together, not independently — yields an
+  decide whether that signal earns its way                                                            actual "probability the Senate/House
+  into the number.                                                                                    flips," not just a pile of separate seat
+                                                                                                      odds.
+
+
+
+  A transparent pollster scorecard                 A full audit trail on every number                 Redistricting fairness metrics, for free
+
+  Every pollster graded on real historical         Click any average or forecast and see              Efficiency gap and mean-median
+  error against certified results, published       the itemized computation: which polls,             difference, computed deterministically
+  openly, and that same grade — not a              which weights, when it last moved and              per district plan — nearly costless given
+  hidden internal number — is what sets            exactly why. Radical transparency                  the boundary history the map already
+  its house-effect weight in the average.          instead of a black box you're asked to             carries, and something almost nobody in
+                                                   trust.                                             this space surfaces well.
+
+
+
+  Comprehensive candidate coverage                 Open data, not a walled garden
+  A real page for every candidate who's            CSV/JSON/API export of any table, for
+  ever appeared on a general-election              anyone who wants to check the
+  ballot for one of the four covered offices,      platform's own work or build something
+  seeded automatically the moment an               new on top of it.
+  official filing record creates the row —
+  not just whoever's currently in the news.
+
+
+
+  THE ACTUAL MOAT
+
+
+  The map, the polls, the electoral history, the forecast, and the Analyst all read off one fact chain — so "why is this number what it is"
+  always has exactly one real answer, traceable end to end, instead of three different tools quietly disagreeing and nobody able to say
+  why.
+
+
+
+
+19 — BUILD
+
+
+
+
+                                                                          31 / 40
+                                                          PollGrid — Clean-Slate Architecture
+
+
+
+
+Schema & configuration
+Real column types, real constraints, a real config.yaml tree, and a testable definition of
+"Phase A is done."
+
+
+
+§ config.yaml, concretely
+Every key below is schema-validated at boot — wrong type, out-of-range value, or unknown
+key all fail the process loudly before migrate() ever runs:
+
+
+
+
+                                                                        32 / 40
+                                                  PollGrid — Clean-Slate Architecture
+
+
+
+
+ingestion:
+ intervals_seconds:
+   polls: 900             # 15 min
+   fec: 3600
+   census: 86400           # daily check, actual data changes far less often
+   congress_gov: 3600
+   news_rss: 120
+   targeted_search: 600
+   markets: 300
+   social: 900
+   results_native: 30      # tightens automatically on election night, see §12
+ ap_elections:
+   enabled: false           # flip true only once an AP account exists
+   api_key_env: AP_ELECTIONS_API_KEY
+ resilience:
+   backoff_multiplier: 2.0
+   max_backoff_seconds: 1800
+   down_after_failures: 3
+
+
+polling:
+ averaging:
+   recency_half_life_days: 14
+   house_effect_adjustment: true
+   min_sample_size: 300
+   weight_by_sample_size: true
+
+
+fundamentals:
+ weights:                     # must sum to 1.0, validator checks it
+   incumbency: 0.20
+   generic_ballot: 0.25
+   economic_index: 0.20
+   partisan_lean: 0.25
+   fundraising_ratio: 0.10
+
+
+correlation:
+ same_window_similarity_threshold: 0.78
+ historical_similarity_threshold: 0.85
+ same_window_max_gap_hours: 72
+
+
+forecasting:
+ enabled: false               # per-category override earned via backtest, see §07
+ brier_ceiling: 0.20
+ min_graded_predictions: 20
+ auto_enable_earned: true
+
+
+genius_layer:                 # see §08
+ ensemble_method: elastic_net_logistic
+ refit_interval_days: 1
+ context_pack_token_budget: 30000
+
+
+llm_provider:
+ primary: ollama_local
+ fallback_order: [groq_free, anthropic, openrouter]
+ ollama:
+   default_model: qwen3:30b-a3b-instruct
+   fallback_model: qwen3:14b
+   upgrade_model: llama3.3:70b
+   host: http://localhost:11434
+
+
+demographics:
+ sync_cadence_days: 30
+ min_population_threshold: 0
+
+
+
+
+                                                                33 / 40
+                                                        PollGrid — Clean-Slate Architecture
+
+
+
+
+§ Real DDL for the geography tier — the primary-key question, settled
+Recommendation: use the Census Bureau's own GEOID/FIPS codes as primary keys
+wherever one already canonically exists (states, counties, congressional districts) rather
+than inventing a surrogate integer — it makes every join against Census/TIGER data direct
+with no separate mapping layer to maintain. Precincts get a surrogate INTEGER PRIMARY
+KEY instead, because no federal agency defines a canonical precinct ID; a state's own
+precinct code, where one exists, is kept as a plain column.
+
+
+
+
+                                                                      34 / 40
+                                                     PollGrid — Clean-Slate Architecture
+
+
+
+
+CREATE TABLE states (
+  fips_code        TEXT PRIMARY KEY,            -- 2-digit Census FIPS, e.g. '06'
+  usps_code        TEXT NOT NULL UNIQUE,        -- 'CA'
+  name             TEXT NOT NULL,
+  elector_method   TEXT NOT NULL CHECK (elector_method IN ('winner_take_all','congressional_district')),
+  electoral_votes INTEGER NOT NULL,
+  is_territory     INTEGER NOT NULL DEFAULT 0
+);
+
+
+CREATE TABLE congressional_districts (
+  geoid            TEXT NOT NULL,               -- Census GEOID, e.g. '0601'
+  congress_number INTEGER NOT NULL,             -- which Congress this boundary version was seated for
+  state_fips       TEXT NOT NULL REFERENCES states(fips_code),
+  district_number INTEGER NOT NULL,             -- 0 = at-large
+  effective_from   TEXT NOT NULL,               -- ISO date
+  effective_to     TEXT,                        -- NULL = current
+  PRIMARY KEY (geoid, congress_number)
+);
+
+
+CREATE TABLE county_equivalents (
+  geoid            TEXT PRIMARY KEY,            -- 5-digit Census FIPS, e.g. '06037'
+  state_fips       TEXT NOT NULL REFERENCES states(fips_code),
+  name             TEXT NOT NULL,
+  type             TEXT NOT NULL CHECK (type IN ('county','parish','borough','census_area','independent_city'))
+);
+
+
+CREATE TABLE precincts (
+  precinct_id            INTEGER PRIMARY KEY,
+  county_geoid           TEXT NOT NULL REFERENCES county_equivalents(geoid),
+  state_precinct_code TEXT,
+  name                   TEXT,
+  coverage_confidence TEXT NOT NULL CHECK (coverage_confidence IN ('measured','derived','thin_coverage')),
+  source_tier            TEXT NOT NULL CHECK (source_tier IN ('native','vest','openelections','manual'))
+);
+
+
+CREATE TABLE demographics (
+  id             INTEGER PRIMARY KEY,
+  tier           TEXT NOT NULL CHECK (tier IN ('nation','state','congressional_district','county_equivalent','precinct')),
+  entity_id      TEXT NOT NULL,                 -- polymorphic: the relevant tier's own PK
+  as_of          TEXT NOT NULL,
+  category       TEXT NOT NULL CHECK (category IN ('population_age','race_ethnicity','education','economic','housing_urbanicity'
+  variable       TEXT NOT NULL,                 -- e.g. 'median_household_income'
+  value          REAL,
+  confidence     TEXT NOT NULL CHECK (confidence IN ('measured','derived')),
+  source         TEXT NOT NULL,                 -- e.g. 'acs5_2024:B19013_001E'
+  UNIQUE (tier, entity_id, as_of, category, variable)
+);
+
+
+CREATE TABLE political_history (
+  id             INTEGER PRIMARY KEY,
+  tier           TEXT NOT NULL CHECK (tier IN ('state','congressional_district','county_equivalent','precinct')),
+  entity_id      TEXT NOT NULL,
+  office         TEXT NOT NULL CHECK (office IN ('president','senate','governor','house')),
+  cycle_year     INTEGER NOT NULL,
+  winner_party TEXT,
+  margin_pct     REAL,
+  turnout_pct    REAL,
+  confidence     TEXT NOT NULL CHECK (confidence IN ('measured','derived','uncertain')),
+  source         TEXT NOT NULL,
+  UNIQUE (tier, entity_id, office, cycle_year)
+);
+
+
+
+
+"PHASE A IS DONE" — A TESTABLE DEFINITION, NOT A FEELING
+
+
+
+
+                                                                   35 / 40
+                                                              PollGrid — Clean-Slate Architecture
+
+
+
+
+   All 56 rows present in states (50 + DC + 5 territories), each with a valid elector_method . Exactly 435 current-vintage rows in
+    congressional_districts ( effective_to IS NULL ). county_equivalents row count between 3,140 and 3,150 (the real-world
+   count fluctuates slightly with consolidations — treating 3,143 as a rigid target is itself a bug). Zero rows returned by SELECT geoid FROM
+   county_equivalents WHERE state_fips NOT IN (SELECT fips_code FROM states) — the referential-integrity check that must pass
+   before Phase A is considered complete. And config.yaml validates clean against the schema above with zero warnings.
+
+
+
+§ The rest of the schema, grouped
+
+  GROUP                  TABLES
+
+
+  Core fact chain        sources , raw_items , polls , extracted_facts (hash-chained, append-only)
+
+  Geography &            states , county_equivalents , congressional_districts , precincts , demographics , political_history — real DDL
+  demographics           above
+
+  Political entities     candidates (every historical filer, not just current), officeholders , parties , pacs , donors_aggregated , media_outlets
+
+  Races                  races , primaries , race_candidates , electoral_vote_allocations , redistricting_events
+
+  Modeling               poll_averages , fundamentals_snapshots , ideology_scores , forecasts , chamber_simulations , volatility_scores ,
+                         anomaly_flags , second_order_links , coalition_models
+
+  The genius layer        qualitative_factor_scores (entity + factor_key + score + citation + as_of , one row per re-score), ensemble_weights (the
+                         elastic-net coefficients, refit per category, stored as data), ensemble_backtest_results (qualitative-augmented vs. quantitative-
+                         only Brier comparison, per category)
+
+  Articles & retrieval    race_search_profiles (name variants, cycle tags, candidate aliases, auto-updated on new filings), article_entity_links
+                         (which race/candidate profile(s) an ingested article matched)
+
+  Rhetoric, framing &     media_framing_scores (outlet + story + topic + framing-direction, rubric-scored), topic_stance_scores (candidate + topic +
+  spend                  stance, rubric-scored), ad_spend (race + sponsor + medium + amount, sourced from FEC independent-expenditure filings)
+
+  Trust &                pollster_ratings (historical error, grade, feeds the averaging weight), redistricting_fairness_scores (efficiency gap, mean-
+  transparency           median difference, per district plan), computation_audit_log (the itemized trace behind every average/forecast)
+
+  The Analyst            context_packs (per entity, invalidated on upstream sync, rebuilt lazily on demand — see §10), analyst_sessions ,
+                         analyst_messages
+
+  Predictions &          predictions (hash-chained), backtest_results , correlation_feedback
+  provenance
+
+  Election night         results_live (+ source_tier : native/openelections/ap/manual), race_calls ( called_by NOT NULL, human only)
+
+  Engagement             watchlist_items , bookmarks , annotations , daily_briefings
+
+
+
+Deliberately not in this list: no map_scenarios table — a build-your-own-map scenario is
+client-side state encoded straight into its share URL, never server-stored. And
+ballot_measures / any state-legislative chamber_composition table are intentionally
+absent too — races stay typed generically enough to add both later, but nothing seeds,
+syncs, or serves either until state houses are back in scope.
+
+
+
+20 — BUILD
+
+
+
+
+                                                                            36 / 40
+                                                     PollGrid — Clean-Slate Architecture
+
+
+
+
+API surface
+One route module per concern, every read route taking as_of .
+
+
+
+ ROUTE FAMILY                                        COVERS
+
+
+  /api/races , /api/races/{id}                       Race detail: averages, fundamentals, forecast, narrative, corroboration
+
+  /api/candidates , /api/parties                     Curated-floor + synced + AI-filled dossiers
+
+  /api/demographics/{tier}/{entity_id}               Full demographic panel for one state/district/county-equivalent/precinct, with confidence tags
+
+  /api/demographics/trends/{race_id}                 The coalition detector's output — which demographic variables explain the most movement
+
+  /api/polls                                         Global filterable poll browser — race type, geography, pollster, date range, methodology
+
+  /api/articles/{entity_type}/{id}                   Every article a race/candidate/party's search profile has matched, recency- or relevance-
+                                                     sorted
+
+  /api/factors/{race_id}                             The Qualitative Factor Scorecard for a race — every factor, its score, and its citation
+
+  /api/forecast/ensemble/{race_id}                   Quantitative-only vs. qualitative-augmented probability, side by side, plus which one is actually
+                                                     live for that category
+
+  /api/races/{id}/framing                            The media-framing matrix and ad-spend-by-sponsor breakdown for a race
+
+  /api/entities/{tier}/{id}/history                  Electoral history for one state/district/county-equivalent/precinct, across every applicable race
+                                                     type, boundary-aware
+
+  /api/pollsters/{id}/rating ,                       The transparent accuracy scorecard, and what it sets the house-effect weight to
+  /api/pollsters/ratings
+
+  /api/districts/{id}/fairness                       Efficiency gap and mean-median difference for a district plan
+
+  /api/forecast/chamber/{chamber}                    Monte Carlo chamber-control probability (Senate/House majority)
+
+  /api/audit/{metric_id}                             The itemized computation trace behind one average or forecast number
+
+  /api/map/*                                         Boundary tiles by LOD, thematic mode values (incl. per-demographic-category choropleths),
+                                                     live pins
+
+  /api/electionnight/*                               Live results, CALLABLE flags, human call submission
+
+  /api/counterfactual                                Scenario generation and on-demand branch deepening
+
+  /api/analyst/query                                 Grounded Q&A over an entity's context pack, Ollama-first
+
+  /api/forecast/scorecard                            The Brier backtest dashboard — every category, including failing ones
+
+  /api/export/{table}                                Open CSV/JSON export of any table — no walled garden
+
+  /ws/feed                                           Live story-cluster push, hand-rolled WebSocket, REST-poll fallback
+
+  /api/config , /api/diagnostics                     Mirrored tunables; a page that actually executes every AI feature live
+
+
+
+
+21 — BUILD
+
+
+
+
+                                                                   37 / 40
+                                                            PollGrid — Clean-Slate Architecture
+
+
+
+
+Directory layout
+
+ PATH           WHAT'S THERE
+
+  config.yaml   Every tunable — nothing hardcoded elsewhere
+
+  core/         Config loader, DB session/locking, provenance hash chain, gazetteer
+
+  ingestion/    Scheduler + one adapter per source family, plus results/tier1_native/ , results/tier2_openelections.py ,
+                 results/tier3_ap.py , results/manual_entry.py , and targeted_search.py (the race-search-profile hunter, §15)
+
+  modeling/     Averaging, fundamentals, ideology, forecasting, chamber_simulation, correlation, volatility, coalition_detector, counterfactual,
+                corroboration, rhetoric, race_calling, pollster_ratings, redistricting_fairness, audit_trail, genius_ensemble.py (the elastic-net stacking
+                model, §08), factors_taxonomy.py (the fixed rubric definitions, §09)
+
+  domain/       Candidates (every historical filer), parties, races, geography (states → districts → county-equivalents → precincts) and demographics at
+                every tier, the curated-floor knowledge layer
+
+  analyst/      Context-pack assembly (lazy rebuild, priority-queued), the Ollama-first reasoning/Q&A engine, cloud-fallback provider chain
+
+  api/          Router, route modules, WebSocket feed
+
+  frontend/     Buildless SPA — map tiers, the map builder (fully client-side), a global polls window, an articles panel on every entity page,
+                race/candidate/party/geography pages with electoral-history panels, live feed, the Analyst, time capsule
+
+  scripts/      Offline boundary/redistricting build pipeline, seeds, per-office historical backfill importers (President to 1789, Senate to 1913,
+                House/Governor as deep as records allow)
+
+  tests/        python -m unittest discover
+
+
+
+
+22 — BUILD
+
+
+
+
+                                                                          38 / 40
+                                                                 PollGrid — Clean-Slate Architecture
+
+
+
+
+Build sequence
+Lettered phases, dependency-ordered — the same convention both prior projects used,
+because it works.
+
+
+
+ A Repo scaffold, config loader + schema               B Demographic ingestion pipeline — the              C Parties, candidates, officeholders schema +
+    validator against the real config.yaml tree,          concrete ACS endpoints and table IDs from           curated-floor seed for the current cycle
+    five-tier geography seed against the real DDL         §05, precinct-level derivation via named
+    — both in §19 — with the stated referential-          population-weighted areal interpolation,
+    integrity check as the actual done-criterion          honest confidence tagging
+
+
+ D Races, primaries, race-candidate linkage,           E Poll ingestion adapters (first dozen-plus         F Poll averaging engine (deterministic)
+    electoral-vote allocation model, historical race      pollsters) + normalization
+    archive back to 1950
+
+
+ G FEC finance ingestion                               H Fundamentals model, now demographic-              I Ideology scoring (deterministic proxy)
+                                                          aware
+
+
+ J Forecasting engine + the Brier backtest gate        K Prediction-market ingestion + forecast/market     L Campaign-event & transcript ingestion +
+                                                          divergence                                          rhetoric/topic taxonomy
+
+
+ M Correlation engine (same-window +                   N Demographic coalition detector, volatility        O Live feed + WebSocket
+    historical-analog against the archive back to         index, anomaly detection
+    1950 landed in phase D — deepened later in
+    phase AA)
+
+
+ P Map Tier 1 (WebGL2) + Tiers 2/3 + offline           Q Thematic map modes, including per-                R The Analyst — context-pack assembly +
+    boundary build pipeline, five tiers,                  demographic-category choropleths at every           Ollama-first reasoning & Q&A
+    redistricting-aware                                   tier
+
+
+ S Race/candidate/party/geography pages,               T Counterfactual engine                             U Corroboration engine
+    SlidePane shell, command palette
+
+
+ V Tier-1 native state-results ingestion +             W Provenance hash chain + verification CLI          X Themes, sound design, accessibility pass
+     CALLABLE flagging + human-call UI — tiers
+
+    2/3 (§05) land in phase NN
+
+
+ Y Time-capsule scrubber over the live feed and        Z Ops hardening — backups, API budgets,
+    map                                                   diagnostics page, nightly jobs
+
+
+A-through-Z is the platform. The second wave below is what makes it the best version of
+itself — comprehensive history, comprehensive candidates, and the features nobody else in
+this space does well.
+
+
+ AA Full historical archive import — President to      BB Comprehensive candidate backfill — a real        CC Electoral-history panel on every entity page,
+      1789, Senate to 1913, House/Governor as              page for every historical candidate across          boundary-aware across redistricting cycles
+      deep as digitized crosswalks allow, every            all four offices, seeded from archival filing
+      row confidence-tagged by era                         records
+
+
+ DD Global polls window + contextual                   EE Pollster accuracy scorecard — historical         FF Build-your-own map — the scenario tool,
+      embedding on every race/geography page               grading, feeding both the public badge and          client-side, URL-encoded sharing, canvas
+                                                           the averaging house-effect weight                   PNG export
+
+
+ GG Chamber-control Monte Carlo simulation             HH Redistricting fairness metrics (efficiency       II Public audit trail — the itemized
+                                                           gap, mean-median difference) per district           computation behind every average and
+
+
+
+
+                                                                               39 / 40
+                                                                 PollGrid — Clean-Slate Architecture
+
+
+
+
+                                                              plan                                                    forecast number
+
+
+  JJ Open data export — CSV/JSON/API access
+       to any table
+
+
+A third wave — the qualitative-genius layer and its supporting cast — deliberately lands last,
+because every phase in it depends on infrastructure the first two waves already built: the
+deterministic forecast to compare against, the Analyst's LLM-calling plumbing to reuse, and a
+real historical archive deep enough to backtest a new model against.
+
+
+  KK Targeted news retrieval — race search               LL The factors taxonomy (§09) implemented —             MM The genius ensemble (§08) — Qualitative
+       profiles, per-query ingestion (§15), the               every deterministic formula wired to real               Factor Scorecard scoring pipeline, the
+       Articles-everywhere panel                              columns, every LLM-rubric factor scoped                 elastic-net stacking model, and its
+                                                              and prompted                                            mandatory backtest-vs-quantitative-baseline
+                                                                                                                      gate before anything qualitative-augmented
+                                                                                                                      is ever shown live
+
+
+  NN Official-results tiers 2/3 — bulk
+       OpenElections/VEST sync for historical
+       depth, the optional gated AP adapter for
+       anyone ready to pay for it
+
+
+
+
+Draft architecture, written for review before anything lands in the repo — nothing here has been committed to CLAUDE.md , scaffolded, or scheduled. Say the word and
+phase A starts.
+
+
+
+
+                                                                               40 / 40
+

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PollGrid</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-theme="graphite">
+
+  <header id="topbar">
+    <div class="wordmark" title="PollGrid — US political intelligence">
+      <span class="wordmark-glyph">&#x26CA;</span>
+      <span class="wordmark-text">Poll<b>Grid</b></span>
+    </div>
+
+    <div id="volatility-meter" class="vol-meter" title="National volatility index">
+      <span class="vol-label">VOLATILITY</span>
+      <span class="vol-bar"><span class="vol-fill" style="width:0%"></span></span>
+      <span class="vol-num">&mdash;</span>
+    </div>
+
+    <nav id="topnav" class="topnav">
+      <a href="#/">Map</a>
+      <a href="#/polls">Polls</a>
+      <a href="#/builder">Builder</a>
+      <a href="#/scorecard">Scorecard</a>
+      <a href="#/analyst">Analyst</a>
+    </nav>
+
+    <div class="topbar-right">
+      <span id="en-chip" class="en-chip" hidden>ELECTION NIGHT</span>
+      <label class="theme-picker">
+        <select id="theme-select" title="Theme">
+          <option value="graphite">Graphite &amp; Brass</option>
+          <option value="broadcast">Broadcast Night</option>
+          <option value="newsroom">Newsroom</option>
+          <option value="contrast">High Contrast</option>
+        </select>
+      </label>
+      <button id="sound-toggle" class="icon-btn" title="Toggle sound">&#x1D11E;</button>
+      <span class="palette-hint" id="palette-hint" title="Command palette">Ctrl+K</span>
+    </div>
+  </header>
+
+  <div id="shell">
+    <aside id="pane" class="pane" aria-label="Detail pane"></aside>
+
+    <main id="stage">
+      <div id="map-root" aria-label="Map"></div>
+      <div id="map-hud"></div>
+      <div id="en-root"></div>
+      <div id="view-root" hidden></div>
+      <div id="asof-banner" class="asof-banner" hidden></div>
+    </main>
+
+    <aside id="feed" class="feed" aria-label="Live feed"></aside>
+  </div>
+
+  <footer id="scrubber"></footer>
+
+  <div id="palette-root"></div>
+  <div id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="/src/App.js"></script>
+</body>
+</html>

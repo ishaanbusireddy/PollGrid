@@ -1,0 +1,99 @@
+# PollGrid — every tunable lives here. Schema-validated at boot (core/config_schema.py);
+# a bad type, range, or unknown key fails the whole process loudly before migrate() runs.
+
+server:
+  port: 8811
+  host: 127.0.0.1
+
+database:
+  path: data/pollgrid.db
+
+ingestion:
+  intervals_seconds:
+    polls: 900              # 15 min
+    fec: 3600
+    census: 86400           # daily check; the data itself changes far less often
+    congress_gov: 3600
+    news_rss: 120
+    targeted_search: 600
+    markets: 300
+    social: 900
+    results_native: 30      # tightened by election-night mode (ingestion/scheduler.py)
+  election_night:
+    results_native_seconds: 15
+  ap_elections:
+    enabled: false          # flip true only once an AP account exists
+    api_key_env: AP_ELECTIONS_API_KEY
+  resilience:
+    backoff_multiplier: 2.0
+    max_backoff_seconds: 1800
+    down_after_failures: 3
+  budgets:                  # daily request budgets for anything rate-capped
+    census: 400
+    fec: 900
+    congress_gov: 500
+    targeted_search: 4000   # Google News RSS: budget-capped, competitiveness-rotated
+
+polling:
+  averaging:
+    recency_half_life_days: 14
+    house_effect_adjustment: true
+    min_sample_size: 300
+    weight_by_sample_size: true
+
+fundamentals:
+  weights:                  # must sum to 1.0, validator checks it
+    incumbency: 0.20
+    generic_ballot: 0.25
+    economic_index: 0.20
+    partisan_lean: 0.25
+    fundraising_ratio: 0.10
+
+correlation:
+  same_window_similarity_threshold: 0.78
+  historical_similarity_threshold: 0.85
+  same_window_max_gap_hours: 72
+
+volatility:
+  z_window: 14
+  cusum_k: 0.5
+  cusum_h: 4.0
+
+forecasting:
+  enabled: false            # per-category visibility earned via the Brier backtest
+  brier_ceiling: 0.20
+  min_graded_predictions: 20
+  auto_enable_earned: true
+
+chamber_simulation:
+  n_sims: 20000
+  national_shock_sd: 0.025
+
+genius_layer:
+  ensemble_method: elastic_net_logistic
+  refit_interval_days: 1
+  l1_ratio: 0.5
+  alpha: 0.1
+  context_pack_token_budget: 30000
+
+llm_provider:
+  primary: ollama_local
+  fallback_order: [groq_free, anthropic, openrouter]
+  ollama:
+    default_model: qwen3:30b-a3b-instruct
+    fallback_model: qwen3:14b
+    upgrade_model: llama3.3:70b
+    host: http://localhost:11434
+
+analyst:
+  queue_lanes: 2            # interactive preempts background (queue-jump; in-flight bg canceled)
+
+demographics:
+  sync_cadence_days: 30
+  min_population_threshold: 0
+
+election_night:
+  auto_publish_calls: false   # ALSO hardcoded False in modeling/race_calling.py — this key is display-only
+
+synthetic:
+  allow_seed_demo: true       # scripts/seed_demo.py refuses to run when false
