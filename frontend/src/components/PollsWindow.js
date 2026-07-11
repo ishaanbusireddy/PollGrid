@@ -54,7 +54,8 @@ export function pollsTable(rows, opts = {}) {
   for (const p of rows) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${gradeChip(p.pollster_grade)} ${escapeHtml(p.pollster)}</td>
+      <td>${gradeChip(p.pollster_grade)} ${escapeHtml(p.pollster)}
+        ${p.is_synthetic ? '<span class="chip warn synth-chip" title="synthetic demo row — remove with scripts/purge_synthetic.py">SYNTH</span>' : ''}</td>
       <td>${p.race_id ? `<a href="#/race/${p.race_id}">${escapeHtml(p.race_name || 'race #' + p.race_id)}</a>` : escapeHtml(p.race_name || '—')}</td>
       <td class="mono" style="font-size:11px">${escapeHtml(p.field_start || '?')} → ${escapeHtml(p.field_end || '?')}<br>
         <span class="dim">${escapeHtml(p.population || '')}</span></td>

@@ -53,8 +53,12 @@ SCHEMA: dict = {
         "brier_ceiling": (float, 0.0, 1.0),
         "min_graded_predictions": (int, 1, 10000),
         "auto_enable_earned": (bool, None, None),
+        "margin_scale": (float, 0.5, 20.0),
+        "fundamentals_weight_with_polls": (float, 0.0, 1.0),
     },
-    "chamber_simulation": {"n_sims": (int, 100, 2000000), "national_shock_sd": (float, 0.0, 0.5)},
+    "election_night_calling": {"callable_margin_factor": (float, 0.5, 5.0)},
+    "chamber_simulation": {"n_sims": (int, 100, 2000000), "national_shock_sd": (float, 0.0, 0.5),
+                           "senate_not_up_dem": (int, 0, 100), "senate_not_up_rep": (int, 0, 100)},
     "genius_layer": {
         "ensemble_method": (str, None, None),
         "refit_interval_days": (int, 1, 365),

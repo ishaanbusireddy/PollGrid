@@ -1,11 +1,11 @@
 /* SoundEngine.js — pure Web Audio synthesis, no samples.
-   - Ambient pad: two detuned oscillators through a lowpass whose cutoff and
-     LFO rate track the national volatility score (0–100).
    - Chimes: soft two-note (poll movement), short arpeggio (breaking story),
      three-note fanfare (race call) — all ADSR-enveloped.
    - Convolution reverb built from a synthesized exponential-decay impulse.
    - Master mute persisted in localStorage; AudioContext resumed only on the
-     first user gesture (autoplay policy). */
+     first user gesture (autoplay policy).
+   (The old volatility-tracking ambient pad was removed with the volatility
+   feature — the engine is chimes-only now.) */
 
 const KEY = 'pollgrid.sound';
 
@@ -13,8 +13,6 @@ export class SoundEngine {
   constructor() {
     this.ctx = null;
     this.enabled = this._loadEnabled();
-    this.volatility = 20;
-    this.started = false;
     this._gestureBound = false;
   }
 
@@ -43,7 +41,6 @@ export class SoundEngine {
       this._buildGraph();
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
-    if (this.enabled && !this.started) this._startAmbient();
   }
 
   _buildGraph() {
@@ -67,41 +64,6 @@ export class SoundEngine {
     this.bus.connect(this.dry).connect(this.master);
     this.bus.connect(this.reverb).connect(this.reverbGain).connect(this.master);
     this.master.connect(ctx.destination);
-  }
-
-  _startAmbient() {
-    const ctx = this.ctx;
-    if (!ctx || this.started) return;
-    this.started = true;
-    this.padGain = ctx.createGain();
-    this.padGain.gain.value = 0.0;
-    this.padGain.gain.linearRampToValueAtTime(0.08, ctx.currentTime + 4);
-    this.padFilter = ctx.createBiquadFilter();
-    this.padFilter.type = 'lowpass';
-    this.padFilter.frequency.value = 300;
-    this.padFilter.Q.value = 2;
-    const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 55;    // A1
-    const o2 = ctx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.value = 82.4;  // E2, detuned
-    o2.detune.value = 6;
-    // LFO on the filter cutoff — rate tracks volatility
-    this.lfo = ctx.createOscillator(); this.lfo.type = 'sine';
-    this.lfoGain = ctx.createGain(); this.lfoGain.gain.value = 120;
-    this.lfo.connect(this.lfoGain).connect(this.padFilter.frequency);
-    o1.connect(this.padFilter); o2.connect(this.padFilter);
-    this.padFilter.connect(this.padGain).connect(this.bus);
-    o1.start(); o2.start(); this.lfo.start();
-    this.setVolatility(this.volatility);
-  }
-
-  /** 0–100 volatility → filter cutoff + LFO rate (tone & tempo of the pad). */
-  setVolatility(score) {
-    this.volatility = Math.max(0, Math.min(100, +score || 0));
-    if (!this.ctx || !this.padFilter) return;
-    const t = this.ctx.currentTime;
-    const cutoff = 200 + (this.volatility / 100) * 1800;   // 200 → 2000 Hz
-    const rate = 0.05 + (this.volatility / 100) * 0.55;    // LFO Hz
-    this.padFilter.frequency.setTargetAtTime(cutoff, t, 1.5);
-    this.lfo.frequency.setTargetAtTime(rate, t, 1.5);
   }
 
   toggle() {

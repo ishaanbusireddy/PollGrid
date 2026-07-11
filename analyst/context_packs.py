@@ -32,9 +32,14 @@ def invalidate_for_race(race_id: int) -> None:
 
 
 def _demographics_block(tier: str, entity_id: str) -> list[dict]:
-    return db.query(
-        "SELECT category, variable, value, confidence, source, MAX(as_of) as_of FROM demographics "
-        "WHERE tier=? AND entity_id=? GROUP BY category, variable", (tier, entity_id))
+    rows = db.query(
+        "SELECT category, variable, value, confidence, source, as_of, is_synthetic FROM demographics "
+        "WHERE tier=? AND entity_id=? ORDER BY category, variable, is_synthetic, as_of DESC",
+        (tier, entity_id))
+    seen: dict[tuple, dict] = {}
+    for r in rows:  # real beats synthetic, then latest vintage (ORDER BY does the work)
+        seen.setdefault((r["category"], r["variable"]), r)
+    return list(seen.values())
 
 
 def _history_block(tier: str, entity_id: str) -> list[dict]:

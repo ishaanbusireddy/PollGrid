@@ -11,7 +11,9 @@ from core.util import now_iso
 
 AUTO_PUBLISH_CALLS = False  # hardcoded. Changing this constant does nothing: no auto-call path exists.
 
-CALLABLE_MARGIN_FACTOR = 1.0  # callable when leader's margin > remaining votes * factor
+def CALLABLE_MARGIN_FACTOR():
+    from core.config import cfg
+    return cfg("election_night_calling.callable_margin_factor")
 
 
 def _sync_election_night_mode() -> None:
@@ -43,7 +45,7 @@ def evaluate_callable() -> int:
         called = db.query_one("SELECT 1 FROM race_calls WHERE race_id=?", (race["id"],))
         if called:
             new_status = "called"
-        elif margin > remaining * CALLABLE_MARGIN_FACTOR:
+        elif margin > remaining * CALLABLE_MARGIN_FACTOR():
             new_status = "callable"  # flag for human review — and stop there
         else:
             new_status = "live"

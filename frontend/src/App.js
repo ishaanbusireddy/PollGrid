@@ -22,18 +22,33 @@ import { TimeScrubber } from './components/TimeScrubber.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { SoundEngine } from './components/SoundEngine.js';
 import { Scorecard } from './components/Scorecard.js';
+import { Diagnostics } from './components/Diagnostics.js';
 import { composeSnapshot, downloadCanvas } from './components/Snapshot.js';
 
 const THEME_KEY = 'pollgrid.theme';
+const RACE_TYPE_KEY = 'pollgrid.race_type';
+const RACE_TYPES = ['president', 'senate', 'governor', 'house'];
+
+/* DC & the territories — no map geometry to click (except PR), so the HUD
+   chip row and the command palette are their navigation affordance. */
+const TERRITORIES = [
+  { key: '11', usps: 'DC', name: 'District of Columbia' },
+  { key: '72', usps: 'PR', name: 'Puerto Rico' },
+  { key: '66', usps: 'GU', name: 'Guam' },
+  { key: '78', usps: 'VI', name: 'U.S. Virgin Islands' },
+  { key: '60', usps: 'AS', name: 'American Samoa' },
+  { key: '69', usps: 'MP', name: 'Northern Mariana Islands' },
+];
 
 /* ---------------- state ---------------- */
 
 const state = {
-  theme: 'graphite',
+  theme: 'newsroom',
   tier: null,               // active renderer tier (1|2|3)
   tierSource: 'detected',
   asOf: null,               // 'YYYY-MM-DD' | null = LIVE
   mode: 'partisan_lean',    // thematic map mode
+  raceType: 'senate',       // race_type for the value modes (HUD segmented control)
   mapTier: 'state',         // choropleth tier currently shown (LOD)
   selection: null,          // {type, id}
   electionNight: false,
@@ -73,9 +88,12 @@ function navigate(hash) {
 /* ---------------- boot ---------------- */
 
 async function boot() {
-  // theme
-  try { state.theme = localStorage.getItem(THEME_KEY) || 'graphite'; } catch (e) { /* noop */ }
+  // theme — Newsroom (light) by default; a previously saved theme wins
+  try { state.theme = localStorage.getItem(THEME_KEY) || 'newsroom'; } catch (e) { /* noop */ }
   document.body.dataset.theme = state.theme;
+  // race-type for the value map modes — Senate by default, persisted
+  try { state.raceType = localStorage.getItem(RACE_TYPE_KEY) || 'senate'; } catch (e) { /* noop */ }
+  if (!RACE_TYPES.includes(state.raceType)) state.raceType = 'senate';
   $('#theme-select').value = state.theme;
   $('#theme-select').addEventListener('change', (e) => setTheme(e.target.value));
 
@@ -112,6 +130,8 @@ async function boot() {
     getMap: () => map,
     statesByFips,
     states: statesList,
+    territories: TERRITORIES,
+    refreshWatchlist: () => feed && feed.refreshWatchlist(),
     flyToState: (fips) => map && map.flyToFeature('state', fips),
     flyToCounty: async (geoid) => {
       await ensureCounties();
@@ -139,6 +159,7 @@ async function boot() {
   const feed = new Feed($('#feed'), bag);
   const pollsWindow = new PollsWindow($('#view-root'), bag);
   const scorecard = new Scorecard($('#view-root'), bag);
+  const diagnostics = new Diagnostics($('#view-root'), bag);
   const analyst = new Analyst($('#view-root'), bag);
   const builder = new MapBuilder($('#pane'), bag);
   const electionNight = new ElectionNight($('#en-root'), bag);
@@ -146,7 +167,7 @@ async function boot() {
   new CommandPalette($('#palette-root'), bag);
   $('#palette-hint').addEventListener('click', () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })));
 
-  window.pg = { state, pane, feed, pollsWindow, scorecard, analyst, builder, electionNight, scrubber, bag };
+  window.pg = { state, pane, feed, pollsWindow, scorecard, diagnostics, analyst, builder, electionNight, scrubber, bag };
 
   /* ----- map ----- */
   buildMap();
@@ -154,7 +175,7 @@ async function boot() {
   loadMapValues();
   probeDistricts();
 
-  /* ----- backend status, volatility, pins ----- */
+  /* ----- backend status, pins ----- */
   api.status().then((s) => {
     state.status = s;
     if (!s) {
@@ -169,7 +190,6 @@ async function boot() {
       chip.addEventListener('click', () => bag.activateElectionNight(null));
     }
   });
-  api.volatility('national').then((v) => v && setVolatility(v.score));
   api.mapPins().then((p) => p && map && map.setPins(p));
 
   /* ----- websocket + REST fallback ----- */
@@ -209,7 +229,7 @@ async function boot() {
       sound.pollChime();
       toast(`New poll: ${p.pollster || '?'} — ${p.race_name || 'race #' + p.race_id}`);
     } else if (frame.type === 'volatility') {
-      if (!p.scope || p.scope === 'national') setVolatility(p.score);
+      // volatility feature removed from the UI — frame intentionally ignored
     } else if (frame.type === 'race_call') {
       sound.callFanfare();
       toast(`RACE CALLED by ${p.called_by}: ${p.winner_party} — race #${p.race_id}`);
@@ -241,13 +261,6 @@ async function boot() {
     if (map && map.refreshTheme) map.refreshTheme();
     if (state.builderActive) builder._paint();
     renderLegend();
-  }
-
-  function setVolatility(score) {
-    if (score == null) return;
-    $('#volatility-meter .vol-fill').style.width = `${Math.min(100, score)}%`;
-    $('#volatility-meter .vol-num').textContent = Math.round(score);
-    sound.setVolatility(score);
   }
 
   function setAsOf(asOf) {
@@ -341,6 +354,9 @@ async function boot() {
     const hud = $('#map-hud');
     hud.innerHTML = `
       <div class="hud-row">
+        <div class="seg-control" id="race-type-seg" role="group" title="race type driving the value map modes (forecast, average, lean, turnout)">
+          ${RACE_TYPES.map((t) => `<button data-rt="${t}" class="${t === state.raceType ? 'on' : ''}">${t === 'president' ? 'President' : t === 'senate' ? 'Senate' : t === 'governor' ? 'Governor' : 'House'}</button>`).join('')}
+        </div>
         <select id="mode-select" title="thematic map mode">
           ${ALL_MODES.map((m) => `<option value="${m.key}">${escapeHtml(m.label)}</option>`).join('')}
         </select>
@@ -348,15 +364,33 @@ async function boot() {
         <button id="snapshot-btn" title="download a PNG of the current map + legend">snapshot</button>
       </div>
       <div class="hud-card legend" id="legend"></div>
+      <div class="hud-row territory-row" title="DC & the territories have no clickable map geometry (except PR) — this row is their doorway">
+        <span class="territory-label">DC &amp; Territories</span>
+        ${TERRITORIES.map((t) => `<button class="territory-chip" data-fips="${t.key}" title="${escapeHtml(t.name)}">${t.usps}</button>`).join('')}
+      </div>
       <div class="hud-row">
         <span class="tier-badge" id="tier-badge"></span>
         <select id="tier-select" title="renderer tier override (saved)">
-          <option value="auto">auto</option><option value="1">tier 1 · globe</option>
-          <option value="2">tier 2 · flat</option><option value="3">tier 3 · list</option>
+          <option value="auto">auto</option>
+          <option value="2">2D map (default)</option>
+          <option value="1">3D globe</option>
+          <option value="3">list</option>
         </select>
       </div>`;
     $('#mode-select').value = state.mode;
     $('#mode-select').addEventListener('change', (e) => { state.mode = e.target.value; loadMapValues(); });
+    for (const b of hud.querySelectorAll('#race-type-seg button')) {
+      b.addEventListener('click', () => {
+        if (state.raceType === b.dataset.rt) return;
+        state.raceType = b.dataset.rt;
+        try { localStorage.setItem(RACE_TYPE_KEY, state.raceType); } catch (e) { /* noop */ }
+        for (const x of hud.querySelectorAll('#race-type-seg button')) x.classList.toggle('on', x === b);
+        loadMapValues();
+      });
+    }
+    for (const c of hud.querySelectorAll('.territory-chip')) {
+      c.addEventListener('click', () => navigate(`#/state/${c.dataset.fips}`));
+    }
     $('#districts-toggle').addEventListener('click', () => {
       const on = $('#districts-toggle').classList.toggle('primary');
       if (map && map.setDistrictsVisible) map.setDistrictsVisible(on);
@@ -413,7 +447,7 @@ async function boot() {
     if (!map) return;
     const m = getMode(state.mode);
     const tier = m.tiers.includes(state.mapTier) ? state.mapTier : 'state';
-    const res = await api.mapValues(m.key, tier);
+    const res = await api.mapValues(m.key, tier, m.raceTyped ? { race_type: state.raceType } : {});
     if (!map) return;
     if (!res || !res.values) {
       lastLegend = null;
@@ -461,6 +495,7 @@ async function boot() {
     $('#map-hud').hidden = true; // full-page views cover the map; its HUD must not bleed through
     if (which === 'polls') pollsWindow.show();
     else if (which === 'scorecard') scorecard.show();
+    else if (which === 'diagnostics') diagnostics.show();
     else if (which === 'analyst') analyst.show();
   }
 
@@ -482,7 +517,7 @@ async function boot() {
     }
     const vr = $('#view-root');
 
-    if (page === 'polls' || page === 'scorecard' || page === 'analyst') {
+    if (page === 'polls' || page === 'scorecard' || page === 'analyst' || page === 'diagnostics') {
       pane.close();
       showView(page);
       return;
@@ -511,6 +546,7 @@ async function boot() {
     if (page === 'district') { pane.open({ type: 'district', id: parts[1] }); return; }
     if (page === 'candidate') { pane.open({ type: 'candidate', id: parts[1] }); return; }
     if (page === 'party') { pane.open({ type: 'party', id: parts[1] }); return; }
+    if (page === 'story') { pane.open({ type: 'story', id: parts[1] }); return; }
 
     // default: plain map
     pane.close();

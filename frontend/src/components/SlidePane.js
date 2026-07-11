@@ -76,6 +76,7 @@ export class SlidePane {
         <button data-nav="back" title="Back" ${this.pos <= 0 ? 'disabled' : ''}>←</button>
         <button data-nav="fwd" title="Forward" ${this.pos >= this.stack.length - 1 ? 'disabled' : ''}>→</button>
         <span class="spacer"></span>
+        <button data-nav="watch" class="watch-btn" title="Add to watchlist" hidden>☆</button>
         <span class="chip">${escapeHtml(view.type)}</span>
         <button data-nav="close" title="Close pane">✕</button>
       </div>
@@ -83,6 +84,7 @@ export class SlidePane {
     this.root.querySelector('[data-nav=back]').addEventListener('click', () => this.back());
     this.root.querySelector('[data-nav=fwd]').addEventListener('click', () => this.forward());
     this.root.querySelector('[data-nav=close]').addEventListener('click', () => { this.close(); this.bag.navigate('#/'); });
+    this._wireWatchButton(view, token);
     const body = this.root.querySelector('.pane-body');
 
     const pages = {
@@ -92,6 +94,7 @@ export class SlidePane {
       district: () => this._districtPage(body, view.id),
       candidate: () => this._candidatePage(body, view.id),
       party: () => this._partyPage(body, view.id),
+      story: () => this._storyPage(body, view.id),
     };
     const fn = pages[view.type];
     if (!fn) { body.innerHTML = ''; body.appendChild(empty('Unknown view.')); return; }
@@ -103,6 +106,39 @@ export class SlidePane {
         body.appendChild(empty('This view failed to render.', String(e.message || e)));
       }
     }
+  }
+
+  /* ---------------- watchlist star (race / state / candidate) ---------------- */
+
+  async _wireWatchButton(view, token) {
+    const WATCHABLE = { race: 'race', state: 'state', candidate: 'candidate' };
+    const entityType = WATCHABLE[view.type];
+    const btn = this.root.querySelector('[data-nav=watch]');
+    if (!btn || !entityType) return;
+    const rows = await this.bag.api.watchlist();
+    if (this._token !== token || !btn.isConnected) return;
+    if (rows === null) return; // route unavailable -> feature hidden
+    const entityId = String(view.id);
+    let watched = rows.some((w) => w.entity_type === entityType && String(w.entity_id) === entityId);
+    const paint = () => {
+      btn.textContent = watched ? '★' : '☆';
+      btn.classList.toggle('on', watched);
+      btn.title = watched ? 'Remove from watchlist' : 'Add to watchlist';
+    };
+    paint();
+    btn.hidden = false;
+    btn.addEventListener('click', async () => {
+      const was = watched;
+      watched = !watched; paint(); // optimistic
+      try {
+        if (watched) await this.bag.api.watchlistAdd(entityType, entityId);
+        else await this.bag.api.watchlistDelete(entityType, entityId);
+        if (this.bag.refreshWatchlist) this.bag.refreshWatchlist();
+      } catch (e) {
+        watched = was; paint(); // revert
+        this.bag.toast(`Watchlist update failed: ${e.message || e}`);
+      }
+    });
   }
 
   /* ---------------- shared sub-panels ---------------- */
@@ -316,16 +352,19 @@ export class SlidePane {
       body.appendChild(root);
     }
 
-    // corroboration badge + volatility + narrative
+    // corroboration badge + narrative
     {
       const { root, body: cb } = panel('Signals');
       if (data.corroboration && data.corroboration.badge) {
         cb.appendChild(el(`<span class="chip ok" title="poll direction corroborated by independently-sourced non-poll signals">✓ corroborated</span>`));
-        for (const s of data.corroboration.signals || []) cb.appendChild(el(`<span class="chip">${escapeHtml(String(s))}</span>`));
+        for (const s of data.corroboration.signals || []) {
+          const arrow = s.direction > 0 ? ' ↑D' : (s.direction < 0 ? ' ↑R' : '');
+          const count = s.count != null ? ` ×${s.count}` : '';
+          cb.appendChild(el(`<span class="chip">${escapeHtml(String(s.channel || s))}${arrow}${count}</span>`));
+        }
       } else {
         cb.appendChild(el(`<span class="chip" title="no independent corroboration yet">uncorroborated</span>`));
       }
-      if (data.volatility) cb.appendChild(el(`<div class="kv"><span class="k">race volatility</span><span class="v">${data.volatility.score ?? '—'}</span></div>`));
       const n = data.narrative;
       if (n) {
         cb.appendChild(el(`<div class="mt" style="font-size:12.5px">
@@ -447,10 +486,64 @@ export class SlidePane {
         <b>${escapeHtml(b.label)}</b>
         <div class="mono" style="font-size:11px">${Object.entries(b.probs || {}).map(([k, v]) => `${escapeHtml(k)} ${(v * 100).toFixed(0)}%`).join(' · ')}</div>
         ${b.narrative ? `<div style="font-size:12px;margin-top:4px">${escapeHtml(b.narrative)}</div>` : ''}
-        ${(b.precedents || []).length ? `<div class="dim" style="font-size:10px;margin-top:4px">precedents: ${b.precedents.map((p) => `${p.cycle_year} — ${escapeHtml(p.description || '')}`).join('; ')}</div>` : ''}
+        ${(b.precedents || []).length ? `<div class="dim" style="font-size:10px;margin-top:4px">precedents: ${b.precedents.map((p) => `${p.cycle_year} ${escapeHtml(p.state || '')} ${escapeHtml(p.office || '')}: ${escapeHtml(p.winner_party || '?')} by ${p.margin_pct != null ? Number(p.margin_pct).toFixed(1) : '?'} pts`).join('; ')}</div>` : ''}
       </div></div>`));
     }
     out.appendChild(el(`<div class="dim" style="font-size:10px">probabilities honestly non-summing · generated by ${escapeHtml(cf.generated_by || '?')}</div>`));
+  }
+
+  /* ---------------- story detail (#/story/{id}) ---------------- */
+
+  async _storyPage(body, id) {
+    const data = await this.bag.api.story(id);
+    body.innerHTML = '';
+    if (!data || !data.story) {
+      body.appendChild(el(`<h2 class="pane-title">Story #${escapeHtml(String(id))}</h2>`));
+      body.appendChild(empty('Story unavailable.',
+        `GET /api/stories/${id} failed — unknown story id, or the backend is offline`));
+      return;
+    }
+    const s = data.story;
+    body.appendChild(el(`<h2 class="pane-title">${escapeHtml(s.headline || '(untitled story)')}</h2>`));
+
+    const meta = el(`<div class="pane-sub row" style="row-gap:4px"></div>`);
+    if (s.category) meta.appendChild(el(`<span class="chip accent">${escapeHtml(s.category)}</span>`));
+    if (s.race_id) {
+      const raceLabel = (data.race && data.race.name) || `race #${s.race_id}`;
+      meta.appendChild(el(`<a href="#/race/${s.race_id}"><span class="chip dem" style="cursor:pointer" title="open the related race">${escapeHtml(raceLabel)}</span></a>`));
+    }
+    if (s.state_fips) {
+      const fips = String(s.state_fips).padStart(2, '0');
+      const name = this.bag.statesByFips[fips]?.name || `state ${fips}`;
+      meta.appendChild(el(`<a href="#/state/${fips}"><span class="chip" style="cursor:pointer">${escapeHtml(name)}</span></a>`));
+    }
+    if (s.is_synthetic) meta.appendChild(el(`<span class="chip warn synth-chip" title="synthetic demo row — remove with scripts/purge_synthetic.py">SYNTH</span>`));
+    if (s.score != null) meta.appendChild(el(`<span class="dim mono" style="font-size:10px">score ${Number(s.score).toFixed(2)}</span>`));
+    if (s.created_at) meta.appendChild(el(`<span class="dim mono" style="font-size:10px">${escapeHtml(String(s.created_at).slice(0, 16).replace('T', ' '))}</span>`));
+    body.appendChild(meta);
+
+    const { root, body: fb } = panel('Fact timeline');
+    const facts = data.facts || [];
+    if (!facts.length) {
+      fb.appendChild(empty('No extracted facts attached to this story yet.',
+        'facts appear as the extraction pipeline processes the underlying articles'));
+    } else {
+      for (const f of facts) {
+        fb.appendChild(el(`
+          <div class="fact-row">
+            <div class="fact-summary">${escapeHtml(f.summary || '(no summary)')}</div>
+            <div class="fact-meta">
+              ${f.category ? `<span class="chip">${escapeHtml(f.category)}</span>` : ''}
+              <span class="mono dim">${escapeHtml(String(f.occurred_at || f.created_at || '?').slice(0, 16).replace('T', ' '))}</span>
+              ${f.outlet ? `<span class="dim">${escapeHtml(f.outlet)}</span>` : ''}
+              ${f.reliability_tier != null ? `<span class="chip" title="source reliability tier">tier ${escapeHtml(String(f.reliability_tier))}</span>` : ''}
+              ${f.url ? `<a href="${escapeHtml(f.url)}" target="_blank" rel="noopener">source ↗</a>` : ''}
+            </div>
+          </div>`));
+      }
+      fb.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:6px">${facts.length} fact(s), newest first — every fact traces to its raw source item</div>`));
+    }
+    body.appendChild(root);
   }
 
   /* ---------------- geography pages ---------------- */
@@ -571,7 +664,6 @@ export class SlidePane {
     const { root: ip, body: ib } = panel('Finance & ideology');
     if (d.finance) {
       ib.appendChild(el(`<div class="kv"><span class="k">total receipts</span><span class="v">$${Number(d.finance.total_receipts || 0).toLocaleString()}</span></div>`));
-      ib.appendChild(el(`<div class="kv"><span class="k">total disbursements</span><span class="v">$${Number(d.finance.total_disbursements || 0).toLocaleString()}</span></div>`));
       ib.appendChild(el(`<div class="dim" style="font-size:10px">FEC, as of ${escapeHtml(d.finance.as_of || '?')}</div>`));
     } else ib.appendChild(empty('No FEC finance summary.', 'finance sync has not reached this candidate'));
     if (d.ideology) {

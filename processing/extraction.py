@@ -90,20 +90,10 @@ def canonicalize(names: list[str]) -> list[int]:
 
 
 def geocode(text: str) -> tuple[str | None, str | None]:
-    """→ (state_fips, county_geoid). Dateline first, then state names/codes,
-    then 'X County'-style county mentions scoped to the found state."""
-    state_fips = None
-    for fips, (usps, name, _) in STATES.items():
-        if re.search(rf"\b{re.escape(name)}\b", text) or re.search(rf"\b{usps}-\d", text):
-            state_fips = fips
-            break
-    county_geoid = None
-    m = re.search(r"\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\s+(County|Parish|Borough)\b", text)
-    if m and state_fips:
-        row = db.query_one("SELECT geoid FROM county_equivalents WHERE state_fips=? AND name LIKE ?",
-                           (state_fips, m.group(1) + "%"))
-        county_geoid = row["geoid"] if row else None
-    return state_fips, county_geoid
+    """→ (state_fips, county_geoid) via the real gazetteer: dateline first, a
+    curated notable-places override, then state/county name resolution."""
+    from core.gazetteer import geocode_text
+    return geocode_text(text)
 
 
 def _match_race(text: str, candidate_ids: list[int], state_fips: str | None) -> int | None:

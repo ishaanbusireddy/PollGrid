@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
 """Offline boundary build. States + counties ship vendored (frontend/static/
-data/). This script fetches current congressional-district shapes (public
-domain, the unitedstates/districts mirror of Census TIGER), simplifies them
-with Douglas-Peucker, and writes frontend/static/data/us_districts.json.
+data/). This script fetches the Census-derived 2022-vintage congressional
+district shapes (cartographic 500k, public domain — the loganpowell/
+census-geojson mirror of the Census cb_2022_us_cd118_500k file), simplifies
+every ring with Douglas-Peucker, and writes
+frontend/static/data/us_districts.json.
+
+Feature normalization: properties -> {geoid, state_fips, district_number},
+feature.id = the 4-digit GEOID (state FIPS + district number, at-large = 00,
+non-voting delegate seats = 98) so the frontend can join rows by id.
+
+Rebuilding from a different vintage later: point --source at any GeoJSON
+FeatureCollection carrying STATEFP + CD###FP (or GEOID) properties — e.g. a
+TIGER/cartographic file converted with `ogr2ogr -f GeoJSON out.json
+cb_2024_us_cd119_500k.shp`. --source accepts a URL or a local path.
 
 Also home to the point-in-polygon twin used by the backend gazetteer — zero
 GIS dependency at runtime, ever.
 
-Usage: python scripts/build_boundaries.py [--tolerance 0.01]
+Usage: python scripts/build_boundaries.py [--tolerance 0.008] [--source URL|PATH]
 """
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from domain.geography import HOUSE_SEATS  # noqa: E402
-
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "frontend", "static", "data", "us_districts.json")
-BASE = "https://theunitedstates.io/districts/cds/2022/{code}/shape.geojson"
+DEFAULT_SOURCE = ("https://raw.githubusercontent.com/loganpowell/census-geojson/"
+                  "master/GeoJSON/500k/2022/congressional-district.json")
+_CD_FIELD = re.compile(r"^CD\d+FP$")  # CD118FP today; CD119FP etc. on rebuilds
+_PRECISION = 4  # ~11 m at the equator; plenty for a national overlay
 
 
 def douglas_peucker(points: list, tol: float) -> list:
@@ -47,10 +60,23 @@ def douglas_peucker(points: list, tol: float) -> list:
     return [points[0], points[-1]]
 
 
+def _round_ring(ring: list) -> list:
+    """Fixed-precision coords, consecutive duplicates (rounding artifacts)
+    collapsed; ring closure (first == last) preserved."""
+    out: list = []
+    for x, y in ring:
+        pt = [round(x, _PRECISION), round(y, _PRECISION)]
+        if not out or pt != out[-1]:
+            out.append(pt)
+    if len(out) > 1 and out[0] != out[-1]:
+        out.append(list(out[0]))
+    return out
+
+
 def simplify_geometry(geom: dict, tol: float) -> dict:
     def simp_ring(ring):
         out = douglas_peucker([tuple(p) for p in ring], tol)
-        return [list(p) for p in (out if len(out) >= 4 else ring)]
+        return _round_ring([list(p) for p in (out if len(out) >= 4 else ring)])
     if geom["type"] == "Polygon":
         return {"type": "Polygon", "coordinates": [simp_ring(r) for r in geom["coordinates"]]}
     if geom["type"] == "MultiPolygon":
@@ -59,30 +85,68 @@ def simplify_geometry(geom: dict, tol: float) -> dict:
     return geom
 
 
+def _load_source(source: str) -> dict:
+    if os.path.exists(source):
+        with open(source, encoding="utf-8") as fh:
+            return json.load(fh)
+    with urllib.request.urlopen(source, timeout=300) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def normalize_feature(feature: dict, tol: float) -> dict | None:
+    """Census CD feature -> {id: geoid, properties: {geoid, state_fips,
+    district_number}} with a simplified geometry. Returns None for the ZZ
+    'undefined' placeholder rows some vintages carry."""
+    props = feature.get("properties") or {}
+    state_fips = (props.get("STATEFP") or props.get("state_fips") or "").strip()
+    cd = next((str(v).strip() for k, v in props.items() if _CD_FIELD.match(k)), "")
+    if not cd:
+        cd = str(props.get("district_number", "")).strip()
+    geoid = (props.get("GEOID") or props.get("geoid") or "").strip()
+    if not cd and len(geoid) == 4:
+        cd = geoid[2:]
+    if not state_fips and len(geoid) == 4:
+        state_fips = geoid[:2]
+    if cd.upper() == "ZZ" or not cd.isdigit() or not state_fips:
+        return None
+    district_number = int(cd)
+    if not geoid:
+        geoid = f"{state_fips}{district_number:02d}"
+    return {"type": "Feature", "id": geoid,
+            "properties": {"geoid": geoid, "state_fips": state_fips,
+                           "district_number": district_number},
+            "geometry": simplify_geometry(feature["geometry"], tol)}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tolerance", type=float, default=0.01)
+    ap.add_argument("--tolerance", type=float, default=0.008,
+                    help="Douglas-Peucker tolerance in degrees (default 0.008)")
+    ap.add_argument("--source", default=DEFAULT_SOURCE,
+                    help="GeoJSON FeatureCollection of congressional districts "
+                         "(URL or local path; default: census-geojson 2022 500k mirror). "
+                         "Use this to rebuild from a newer TIGER-derived file later.")
     args = ap.parse_args()
+    sys.setrecursionlimit(20000)  # DP recursion depth on 500k-resolution rings
+
+    print(f"loading {args.source} …")
+    gj = _load_source(args.source)
+    raw_features = gj.get("features") or []
     features = []
-    for usps, seats in sorted(HOUSE_SEATS.items()):
-        codes = [f"{usps}-AL"] if seats == 1 else [f"{usps}-{n}" for n in range(1, seats + 1)]
-        for code in codes:
-            url = BASE.format(code=code)
-            try:
-                with urllib.request.urlopen(url, timeout=30) as resp:
-                    gj = json.loads(resp.read().decode())
-            except Exception as e:
-                print(f"skip {code}: {e}")
-                continue
-            geom = gj["geometry"] if gj.get("type") == "Feature" else gj["features"][0]["geometry"]
-            features.append({"type": "Feature", "id": code,
-                             "properties": {"code": code, "state": usps},
-                             "geometry": simplify_geometry(geom, args.tolerance)})
-            print(f"ok {code}")
+    for feature in raw_features:
+        norm = normalize_feature(feature, args.tolerance)
+        if norm:
+            features.append(norm)
+    features.sort(key=lambda f: f["id"])
+    if len(features) < 435:
+        sys.exit(f"only {len(features)} districts normalized (need >= 435) — wrong source file?")
+
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as fh:
-        json.dump({"type": "FeatureCollection", "features": features}, fh)
-    print(f"wrote {len(features)} districts → {OUT}")
+        json.dump({"type": "FeatureCollection", "features": features}, fh,
+                  separators=(",", ":"))
+    size = os.path.getsize(OUT)
+    print(f"wrote {len(features)} districts ({size / 1e6:.2f} MB, tolerance {args.tolerance}) → {OUT}")
 
 
 # ---- point-in-polygon twin (used by the gazetteer; no GIS dependency) ----

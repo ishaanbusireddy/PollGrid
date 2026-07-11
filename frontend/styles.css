@@ -124,13 +124,6 @@ h1,h2,h3,h4 { font-family: var(--font); font-weight: 600; margin: 0 0 6px; }
   animation: en-pulse 1.6s ease-in-out infinite;
 }
 
-/* Volatility meter */
-.vol-meter { display: flex; align-items: center; gap: 8px; }
-.vol-label { font-size: 9px; letter-spacing: .14em; color: var(--muted); }
-.vol-bar { width: 90px; height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; }
-.vol-fill { display: block; height: 100%; background: var(--accent); transition: width .8s ease; }
-.vol-num { font-family: var(--mono); font-size: 12px; color: var(--accent); min-width: 24px; }
-
 /* Shell */
 #shell { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
 #stage { flex: 1 1 auto; position: relative; min-width: 0; background: var(--bg); }
@@ -160,6 +153,27 @@ h1,h2,h3,h4 { font-family: var(--font); font-weight: 600; margin: 0 0 6px; }
   flex: 0 0 300px; background: var(--bg2); border-left: 1px solid var(--line);
   display: flex; flex-direction: column; z-index: 20;
 }
+
+/* Watchlist strip (above the feed cards) */
+.watch-strip {
+  flex: 0 0 auto; padding: 6px 10px; border-bottom: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+}
+.watch-strip .watch-title { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+.watch-chip { cursor: pointer; }
+.watch-chip:hover { background: var(--bg3); }
+.watch-btn { font-size: 15px; line-height: 1; padding: 2px 8px; }
+.watch-btn.on { color: var(--amber); border-color: var(--amber); }
+
+/* Daily briefing card (top of the feed rail) */
+.briefing-card {
+  flex: 0 0 auto; margin: 8px 8px 0; padding: 8px 10px; border-radius: 4px;
+  background: var(--bg3); border: 1px solid var(--line); border-left: 3px solid var(--amber);
+  max-height: 220px; overflow-y: auto;
+}
+.briefing-card .briefing-head { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+.briefing-card .briefing-body { white-space: pre-wrap; font-size: 12px; line-height: 1.45; margin-top: 6px; }
+.briefing-card .briefing-model { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 6px; }
 .feed-head {
   flex: 0 0 auto; padding: 8px 12px; border-bottom: 1px solid var(--line);
   display: flex; align-items: center; justify-content: space-between;
@@ -247,6 +261,23 @@ table.grid tr:focus { outline: 1px solid var(--accent); }
 }
 #map-hud > * { pointer-events: auto; }
 .hud-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* Race-type segmented control (primary HUD control for the value modes) */
+.seg-control { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: var(--bg2); }
+.seg-control button {
+  border: 0; border-radius: 0; border-right: 1px solid var(--line);
+  background: transparent; padding: 4px 10px; font-size: 11px;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+}
+.seg-control button:last-child { border-right: 0; }
+.seg-control button:hover { color: var(--text); }
+.seg-control button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+/* DC & territories chip row — their only navigation affordance on the map */
+.territory-row { background: color-mix(in srgb, var(--bg2) 88%, transparent); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+.territory-label { font-size: 9px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.territory-chip { font-family: var(--mono); font-size: 10px; font-weight: 700; padding: 2px 7px; }
+.territory-chip:hover { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .hud-card { background: color-mix(in srgb, var(--bg2) 88%, transparent); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
 .legend .ramp { height: 8px; width: 180px; border-radius: 4px; margin: 5px 0 3px; border: 1px solid var(--line); }
 .legend .legend-lab { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--muted); }
@@ -259,10 +290,10 @@ table.grid tr:focus { outline: 1px solid var(--accent); }
 }
 .hover-tip .tip-val { font-family: var(--mono); color: var(--accent); }
 
-/* as-of banner */
+/* as-of banner — amber bg keeps black text legible on every theme (incl. light) */
 .asof-banner {
   position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 25;
-  background: var(--warn); color: #000; font-weight: 600; font-size: 12px;
+  background: var(--amber); color: #000; font-weight: 600; font-size: 12px;
   border-radius: 4px; padding: 5px 14px; box-shadow: 0 3px 10px rgba(0,0,0,.35);
 }
 
@@ -329,16 +360,43 @@ table.grid tr:focus { outline: 1px solid var(--accent); }
 /* Builder */
 .builder-toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .builder-totals { display: flex; gap: 2px; height: 26px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); min-width: 260px; }
-.builder-totals .seg { display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 700; color: #fff; min-width: 0; overflow: hidden; }
+.builder-totals .seg { display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 700; min-width: 0; overflow: hidden; }
 .builder-legend { display: flex; gap: 5px; flex-wrap: wrap; }
-.builder-legend .bl { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); }
+/* legend swatches are BUTTONS now — clickable paint brushes */
+.builder-legend .bl {
+  display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted);
+  background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 5px; cursor: pointer;
+}
+.builder-legend .bl:hover { border-color: var(--line); color: var(--text); }
+.builder-legend .bl.armed {
+  border-color: var(--accent); color: var(--text); background: var(--bg3);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 .builder-legend .sw { width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--line); }
+body.brush-armed #map-root, body.brush-armed .dchip { cursor: crosshair; }
 .dchip { font-family: var(--mono); font-size: 10px; border: 1px solid var(--line); border-radius: 3px; padding: 2px 6px; cursor: pointer; }
 
 /* Heatmap */
 .heatmap { border-collapse: collapse; font-size: 10px; }
 .heatmap td, .heatmap th { border: 1px solid var(--line); padding: 3px 6px; text-align: center; }
 .heatmap th { color: var(--muted); font-weight: 400; }
+
+/* Story detail — fact timeline */
+.fact-row { border-left: 2px solid var(--line); padding: 4px 0 4px 10px; margin: 6px 0; }
+.fact-row .fact-summary { font-size: 12.5px; line-height: 1.4; }
+.fact-row .fact-meta { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin-top: 3px; font-size: 10px; }
+
+/* SYNTH badge — synthetic demo rows are always visibly flagged */
+.synth-chip { font-weight: 700; }
+
+/* Diagnostics (#/diagnostics) */
+.diag-llm-card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; background: var(--bg2); }
+.diag-llm-card .diag-llm-main { font-family: var(--font); font-size: 22px; }
+.diag-llm-card .diag-llm-sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.diag-llm-card.up { border-left: 4px solid var(--ok); }
+.diag-llm-card.up .diag-llm-main { color: var(--ok); }
+.diag-llm-card.down { border-left: 4px solid var(--err); }
+.diag-llm-card.down .diag-llm-main { color: var(--err); }
 
 /* misc */
 .mini-svg { display: block; }

@@ -64,10 +64,17 @@ forecasting:
   brier_ceiling: 0.20
   min_graded_predictions: 20
   auto_enable_earned: true
+  margin_scale: 4.0         # logistic scale: pts of margin per ~unit log-odds
+  fundamentals_weight_with_polls: 0.35
+
+election_night_calling:
+  callable_margin_factor: 1.0   # CALLABLE when leader margin > est. remaining votes * factor
 
 chamber_simulation:
   n_sims: 20000
   national_shock_sd: 0.025
+  senate_not_up_dem: 24     # seats not up in the modeled cycle (update per cycle)
+  senate_not_up_rep: 43
 
 genius_layer:
   ensemble_method: elastic_net_logistic

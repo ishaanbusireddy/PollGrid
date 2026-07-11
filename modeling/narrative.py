@@ -32,6 +32,43 @@ def _deterministic(race: dict, avg: dict | None, forecast: dict | None) -> dict:
             "confidence": "low", "generated_by": "deterministic"}
 
 
+def cached(race_id: int) -> dict:
+    """The manual's one-call-per-cluster-update discipline: serve the cached
+    narrative; regenerate only when new facts/polls have landed since it was
+    built (refresh_cache, run nightly and on demand when stale). A page open
+    never blocks on an LLM round-trip."""
+    import json
+    from core.util import now_iso
+    row = db.query_one("SELECT value FROM app_meta WHERE key=?", (f"narrative:{race_id}",))
+    fingerprint = _fingerprint(race_id)
+    if row:
+        stored = json.loads(row["value"])
+        if stored.get("_fingerprint") == fingerprint:
+            return {k: v for k, v in stored.items() if not k.startswith("_")}
+    out = generate(race_id)
+    out_store = dict(out)
+    out_store["_fingerprint"] = fingerprint
+    out_store["_built_at"] = now_iso()
+    db.meta_set(f"narrative:{race_id}", json.dumps(out_store))
+    return out
+
+
+def refresh_cache(race_id: int) -> bool:
+    """→ True if the cache was (re)built."""
+    import json
+    row = db.query_one("SELECT value FROM app_meta WHERE key=?", (f"narrative:{race_id}",))
+    if row and json.loads(row["value"]).get("_fingerprint") == _fingerprint(race_id):
+        return False
+    cached(race_id)
+    return True
+
+
+def _fingerprint(race_id: int) -> str:
+    f = db.query_one("SELECT COUNT(*) c, MAX(id) m FROM extracted_facts WHERE race_id=?", (race_id,))
+    p = db.query_one("SELECT COUNT(*) c FROM polls WHERE race_id=?", (race_id,))
+    return f"{f['c']}:{f['m']}:{p['c']}"
+
+
 def generate(race_id: int) -> dict:
     race = db.query_one("SELECT * FROM races WHERE id=?", (race_id,))
     if race is None:

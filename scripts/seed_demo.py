@@ -165,6 +165,9 @@ def seed_election_night(race: dict) -> None:
 def main() -> None:
     if not cfg("synthetic.allow_seed_demo"):
         sys.exit("synthetic.allow_seed_demo is false — refusing to seed demo data")
+    db.migrate()
+    if db.query_one("SELECT 1 FROM polls WHERE is_synthetic=1 LIMIT 1"):
+        sys.exit("demo data already present — run scripts/purge_synthetic.py first.")
     from api.server import bootstrap  # boot path seeds geography/races/sources
     bootstrap(start_ingestion=False)
     import scripts.backfill_history as bh

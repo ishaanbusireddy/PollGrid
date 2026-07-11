@@ -468,6 +468,12 @@ CREATE TABLE IF NOT EXISTS context_packs (
   UNIQUE (entity_type, entity_id)
 );
 
+CREATE TABLE IF NOT EXISTS correlation_feedback (
+  id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL REFERENCES second_order_links(id),
+  verdict TEXT NOT NULL CHECK (verdict IN ('confirmed','spurious','unclear')),
+  note TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS analyst_sessions (
   id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, entity_type TEXT, entity_id TEXT
 );

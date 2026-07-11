@@ -102,7 +102,6 @@ export class Api {
   fairness(dvId)       { return this.tryGet(`/api/districts/${dvId}/fairness`); }
   audit(metricId)      { return this.tryGet(`/api/audit/${metricId}`); }
   counterfactual(raceId, scenario) { return this.tryGet('/api/counterfactual', { race_id: raceId, scenario }); }
-  volatility(scope = 'national')   { return this.tryGet('/api/volatility', { scope }); }
 
   /* ----- analyst ----- */
   analystQuery(body) { return this.post('/api/analyst/query', body); }
@@ -115,8 +114,17 @@ export class Api {
   mapValues(mode, tier, extra = {}) { return this.tryGet('/api/map/values', { mode, tier, ...extra }); }
   mapPins() { return this.tryGet('/api/map/pins'); }
 
-  /* ----- feed fallback ----- */
+  /* ----- feed fallback & stories ----- */
   stories(sinceIso) { return this.tryGet('/api/stories', { since: sinceIso }); }
+  story(id)         { return this.tryGet(`/api/stories/${id}`); }
+
+  /* ----- daily briefing ----- */
+  briefingLatest() { return this.tryGet('/api/briefings/latest'); }
+
+  /* ----- watchlist (POST/DELETE via post; 404 anywhere -> feature hidden) ----- */
+  watchlist()                          { return this.tryGet('/api/watchlist'); }
+  watchlistAdd(entityType, entityId)   { return this.post('/api/watchlist', { entity_type: entityType, entity_id: entityId }); }
+  watchlistDelete(entityType, entityId){ return this.post('/api/watchlist/delete', { entity_type: entityType, entity_id: entityId }); }
 
   /* ----- static boundary data (same-origin vendored files) ----- */
   async staticJson(path) {

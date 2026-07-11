@@ -1,6 +1,9 @@
 /* MapBuilder.js — the 270ToWin-style scenario builder (#/builder), run ON THE
    SAME renderer as the live map (a 'builder' interaction mode: clicks cycle a
-   unit's outcome instead of opening the pane).
+   unit's outcome instead of opening the pane). Fresh entries (no URL payload)
+   PREFILL from the live model (forecast → average_margin → all-Tossup), and
+   the legend swatches double as PAINT BRUSHES: arm one, click units to paint,
+   Escape (or re-click) to disarm.
 
    Outcome gradient (exactly 8 states = 3 bits/unit):
      0 Safe D · 1 Likely D · 2 Lean D · 3 Tossup · 4 Lean R · 5 Likely R ·
@@ -106,10 +109,14 @@ export class MapBuilder {
     this.assign = new Map();      // key -> 0..7
     this.usingFallbackEv = false;
     this.diff = null;             // forecast diff overlay data
+    this.brush = null;            // armed paint outcome (0..7) | null = click-to-cycle
+    this.prefillSource = null;    // 'forecast' | 'average_margin' | null (blank/URL)
+    this._onKeydown = (e) => { if (e.key === 'Escape' && this.brush !== null) this._setBrush(null); };
   }
 
   async activate(payload) {
     this.active = true;
+    document.addEventListener('keydown', this._onKeydown);
     let decoded = payload ? unpackScenario(payload) : null;
     if (decoded && RACE_TYPES[decoded.raceTypeIdx]) {
       this.raceType = RACE_TYPES[decoded.raceTypeIdx];
@@ -120,6 +127,9 @@ export class MapBuilder {
       this.units.forEach((u, i) => {
         if (!u.fixedHolder) this.assign.set(u.key, decoded.values[i] ?? TOSSUP);
       });
+      this.prefillSource = null; // explicit scenario from the URL wins
+    } else {
+      await this._prefillFromModel(); // fresh entry: start from the live model
     }
     this.render();
     this._paint();
@@ -128,22 +138,112 @@ export class MapBuilder {
   deactivate() {
     this.active = false;
     this.diff = null;
+    this._setBrush(null);
+    document.removeEventListener('keydown', this._onKeydown);
     const map = this.bag.getMap();
     if (map) map.setOverrideColors('state', null);
   }
 
-  /** Route a map pick into the builder: cycle the clicked unit's outcome. */
+  /* ---- prefill from the live model ----
+     forecast dem_prob → gradient; fallback to average_margin bands; final
+     fallback leaves everything at Tossup (the _loadUnits default). */
+
+  _outcomeFromProb(p) {
+    if (p >= 0.90) return 0; // Safe D
+    if (p >= 0.75) return 1; // Likely D
+    if (p >= 0.60) return 2; // Lean D
+    if (p <= 0.10) return 6; // Safe R
+    if (p <= 0.25) return 5; // Likely R
+    if (p <= 0.40) return 4; // Lean R
+    return TOSSUP;
+  }
+
+  _outcomeFromMargin(m) {
+    if (m >= 10) return 0;  if (m >= 5) return 1;  if (m >= 2) return 2;
+    if (m <= -10) return 6; if (m <= -5) return 5; if (m <= -2) return 4;
+    return TOSSUP;
+  }
+
+  /** Look a unit up in a /api/map/values map (state fips, or district geoid). */
+  _valueForUnit(u, values) {
+    if (values[u.key] !== undefined) return values[u.key];
+    if (u.key.includes('-')) { // 'SS-D' unit key vs 'SSDD' district geoid
+      const [fips, dn] = u.key.split('-');
+      for (const k of [fips + String(dn).padStart(2, '0'), fips + dn]) {
+        if (values[k] !== undefined) return values[k];
+      }
+    }
+    return undefined;
+  }
+
+  async _prefillFromModel() {
+    this.prefillSource = null;
+    const tier = this.raceType === 'house' ? 'district' : 'state';
+    const extra = { race_type: this.raceType, cycle: this.cycle };
+    const attempts = [
+      ['forecast', (v) => this._outcomeFromProb(+v)],
+      ['average_margin', (v) => this._outcomeFromMargin(+v)],
+    ];
+    for (const [mode, toOutcome] of attempts) {
+      const res = await this.bag.api.mapValues(mode, tier, extra);
+      if (!res || !res.values || !Object.keys(res.values).length) continue;
+      let hits = 0;
+      for (const u of this.units) {
+        if (u.fixedHolder) continue;
+        const v = this._valueForUnit(u, res.values);
+        if (v === undefined || v === null) continue;
+        this.assign.set(u.key, toOutcome(v));
+        hits++;
+      }
+      if (hits) { this.prefillSource = mode; return; }
+    }
+    // both modes empty → all-Tossup (already the default)
+  }
+
+  /* ---- paint mode (legend swatches are brushes) ---- */
+
+  _setBrush(idx) {
+    this.brush = (idx === null || this.brush === idx) ? null : idx;
+    this._paintBrushUi();
+  }
+
+  _paintBrushUi() {
+    document.body.classList.toggle('brush-armed', this.active && this.brush !== null);
+    if (!this.root || !this.active) return;
+    for (const b of this.root.querySelectorAll('.builder-legend .bl')) {
+      b.classList.toggle('armed', +b.dataset.idx === this.brush);
+    }
+    const hint = this.root.querySelector('.brush-hint');
+    if (hint) {
+      hint.textContent = this.brush === null
+        ? 'Click a unit to cycle its outcome — or click a legend swatch to arm it as a brush.'
+        : `Painting "${OUTCOMES[this.brush].label}" — click units (or district chips) to paint; click the swatch again or press Escape to stop.`;
+    }
+  }
+
+  /** Route a map pick into the builder: paint (brush armed) or cycle.
+      Zoomed-in county picks resolve to their parent state — scenario units
+      are states/seats, so painting keeps working at any zoom level. */
   handlePick(unit) {
-    if (!unit || unit.tier !== 'state') return;
-    const u = this.units.find((x) => x.key === unit.key);
+    if (!unit) return;
+    let key = unit.key;
+    if (unit.tier === 'county') key = unit.stateFips || String(unit.key).slice(0, 2);
+    else if (unit.tier !== 'state') return;
+    const u = this.units.find((x) => x.key === key);
     if (!u) { this.bag.toast('That unit is not part of this scenario'); return; }
     if (u.fixedHolder) { this.bag.toast(`${u.label}: not up in ${this.cycle} — fixed at current holder (${u.fixedHolder})`); return; }
-    this.cycleUnit(u.key);
+    if (this.brush !== null) this.setUnit(u.key, this.brush);
+    else this.cycleUnit(u.key);
   }
 
   cycleUnit(key) {
     const cur = this.assign.get(key) ?? TOSSUP;
     this.assign.set(key, (cur + 1) % 8);
+    this._afterChange();
+  }
+
+  setUnit(key, outcome) {
+    this.assign.set(key, outcome);
     this._afterChange();
   }
 
@@ -216,9 +316,23 @@ export class MapBuilder {
           competitive: r.competitiveness && r.competitiveness !== 'safe',
         });
       }
-      this.notice = type === 'senate'
-        ? `Only the ${sorted.length} seats up in ${this.cycle} are toggleable; the rest are fixed at their current holder.`
-        : null;
+      if (type === 'senate') {
+        // seats NOT up this cycle appear fixed at their current holder (real
+        // history where known; '?' otherwise) and count toward the topline
+        const holders = (await this.bag.api.tryGet('/api/geo/senate_holders')) || {};
+        const up = new Set(sorted.map((r) => String(r.state_fips).padStart(2, '0')));
+        for (const fips of Object.keys(this.bag.statesByFips).sort()) {
+          if (fips === '72' || fips === '11' || up.has(fips)) continue;
+          const holder = holders[fips] || '?';
+          this.units.push({
+            key: `fixed-${fips}`, label: `${this.bag.statesByFips[fips].name} (not up)`,
+            ev: 1, stateFips: fips, fixedHolder: holder,
+          });
+        }
+        this.notice = `Only the ${sorted.length} seats up in ${this.cycle} are toggleable; the rest are fixed at their current holder (from certified history where imported, '?' otherwise).`;
+      } else {
+        this.notice = null;
+      }
     } else {
       // degraded: no race data — every state toggleable, honestly labeled
       for (const fips of Object.keys(this.bag.statesByFips).sort()) {
@@ -252,6 +366,11 @@ export class MapBuilder {
 
   /* ---- colors & totals ---- */
 
+  /** Legible text color for an arbitrary computed background (light themes). */
+  _textOn(c) {
+    return (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) > 150 ? '#16181c' : '#ffffff';
+  }
+
   _outcomeColor(v, pal) {
     switch (v) {
       case 0: return pal.dem;
@@ -282,6 +401,12 @@ export class MapBuilder {
   totals() {
     const t = { d: 0, r: 0, tossup: 0, other: 0 };
     for (const u of this.units) {
+      if (u.fixedHolder) { // not-up seat: counts by its current holder
+        if (u.fixedHolder === 'DEM') t.d += u.ev;
+        else if (u.fixedHolder === 'REP') t.r += u.ev;
+        else t.tossup += u.ev; // unknown holder — honestly uncounted for either side
+        continue;
+      }
       const v = this.assign.get(u.key) ?? TOSSUP;
       if (v <= 2) t.d += u.ev;
       else if (v === 3) t.tossup += u.ev;
@@ -318,15 +443,23 @@ export class MapBuilder {
         </div>
         ${this.usingFallbackEv ? `<div class="dim" style="font-size:10px;margin-top:4px">live elector data unavailable — using the vendored 2024 allocation</div>` : ''}
         ${this.notice ? `<div class="empty" style="text-align:left">${escapeHtml(this.notice)}</div>` : ''}
+        <div class="dim prefill-note" style="font-size:10px;margin-top:4px">${this.prefillSource
+          ? `prefilled from the live model (${this.prefillSource === 'forecast' ? 'forecast win probabilities' : 'polling-average margins'})`
+          : ''}</div>
         <div class="builder-totals mt" title="live topline"></div>
         <div class="topline-note dim" style="font-size:10px;margin-top:3px"></div>
-        <div class="builder-legend mt">
+        <div class="builder-legend mt" title="click a swatch to arm it as a paint brush">
           ${OUTCOMES.map((o, i) => {
             const c = this._outcomeColor(i, pal);
-            return `<span class="bl"><span class="sw" style="background:rgb(${c[0]},${c[1]},${c[2]})"></span>${o.label}</span>`;
+            return `<button class="bl" data-idx="${i}" title="arm '${o.label}' as a brush"><span class="sw" style="background:rgb(${c[0]},${c[1]},${c[2]})"></span>${o.label}</button>`;
           }).join('')}
         </div>
-        <p class="dim" style="font-size:11px">Click a unit on the map to cycle its outcome through the eight-state gradient. District-awarded units appear as chips below.</p>
+        <p class="dim brush-hint" style="font-size:11px">Click a unit to cycle its outcome — or click a legend swatch to arm it as a brush.</p>
+        <div class="row" style="font-size:11px">
+          <span class="dim">Reset:</span>
+          <button data-act="reset-blank" title="set every toggleable unit to Tossup">blank</button>
+          <button data-act="reset-model" title="re-prefill from the live model (forecast, then average-margin fallback)">from model</button>
+        </div>
         <div class="builder-chips"></div>
         <div class="panel"><div class="panel-head">Save / share / export</div><div class="panel-body">
           <div class="row">
@@ -348,11 +481,32 @@ export class MapBuilder {
     this.root.querySelector('[data-act=exit]').addEventListener('click', () => this.bag.navigate('#/'));
     this.root.querySelector('[data-f=raceType]').addEventListener('change', async (e) => {
       this.raceType = e.target.value;
-      await this._loadUnits(); this.render(); this._afterChange();
+      await this._loadUnits(); await this._prefillFromModel(); this.render(); this._afterChange();
     });
     this.root.querySelector('[data-f=cycle]').addEventListener('change', async (e) => {
       this.cycle = +e.target.value;
-      await this._loadUnits(); this.render(); this._afterChange();
+      await this._loadUnits(); await this._prefillFromModel(); this.render(); this._afterChange();
+    });
+    for (const b of this.root.querySelectorAll('.builder-legend .bl')) {
+      b.addEventListener('click', () => this._setBrush(+b.dataset.idx));
+    }
+    this.root.querySelector('[data-act=reset-blank]').addEventListener('click', () => {
+      for (const u of this.units) if (!u.fixedHolder) this.assign.set(u.key, TOSSUP);
+      this.prefillSource = null;
+      const note = this.root.querySelector('.prefill-note');
+      if (note) note.textContent = '';
+      this._afterChange();
+    });
+    this.root.querySelector('[data-act=reset-model]').addEventListener('click', async () => {
+      for (const u of this.units) if (!u.fixedHolder) this.assign.set(u.key, TOSSUP);
+      await this._prefillFromModel();
+      const note = this.root.querySelector('.prefill-note');
+      if (note) {
+        note.textContent = this.prefillSource
+          ? `prefilled from the live model (${this.prefillSource === 'forecast' ? 'forecast win probabilities' : 'polling-average margins'})`
+          : 'live model unavailable — reset to all-Tossup';
+      }
+      this._afterChange();
     });
     this.root.querySelector('[data-act=save]').addEventListener('click', () => this._save());
     this.root.querySelector('[data-act=copy]').addEventListener('click', async () => {
@@ -377,6 +531,7 @@ export class MapBuilder {
     this._renderTotals();
     this._renderChips();
     this._renderSaves();
+    this._paintBrushUi();
   }
 
   _renderTotals() {
@@ -386,7 +541,7 @@ export class MapBuilder {
     const tgt = this._target();
     const total = Math.max(1, t.d + t.r + t.tossup + t.other);
     const pal = themePalette();
-    const seg = (v, color, label) => v ? `<span class="seg" style="flex:${v};background:rgb(${color[0]},${color[1]},${color[2]})">${v}</span>` : '';
+    const seg = (v, color) => v ? `<span class="seg" style="flex:${v};background:rgb(${color[0]},${color[1]},${color[2]});color:${this._textOn(color)}">${v}</span>` : '';
     bar.innerHTML =
       seg(t.d, pal.dem) + seg(t.tossup, mix(pal.neutral, pal.bg, 0.2)) + seg(t.other, pal.other) + seg(t.r, pal.rep);
     const note = this.root.querySelector('.topline-note');
@@ -417,10 +572,11 @@ export class MapBuilder {
         const chip = document.createElement('span');
         chip.className = 'dchip';
         chip.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
-        chip.style.color = '#fff';
+        chip.style.color = this._textOn(c);
         chip.textContent = `${u.key} ${OUTCOMES[v].label}`;
         chip.title = u.label;
-        chip.addEventListener('click', () => this.cycleUnit(u.key));
+        // chips accept the armed brush too, otherwise click-to-cycle
+        chip.addEventListener('click', () => (this.brush !== null ? this.setUnit(u.key, this.brush) : this.cycleUnit(u.key)));
         return chip;
       };
       for (const u of competitive) rowEl.appendChild(chipFor(u));

@@ -73,14 +73,35 @@ def geo_districts(req):
                     "ORDER BY state_fips, district_number", (st,) if st else ())
 
 
+@route("GET", "/api/geo/senate_holders")
+def senate_holders(req):
+    """Latest known senate winner per state (real rows only) — the builder's
+    'seats not up display fixed at their current holder' data."""
+    out = {}
+    for r in db.query(
+            """SELECT entity_id, winner_party FROM political_history ph
+               WHERE tier='state' AND office='senate' AND is_synthetic=0 AND winner_party IS NOT NULL
+                 AND cycle_year = (SELECT MAX(cycle_year) FROM political_history
+                                   WHERE tier='state' AND office='senate' AND is_synthetic=0
+                                     AND entity_id=ph.entity_id)"""):
+        out[r["entity_id"]] = r["winner_party"]
+    return out
+
+
 @route("GET", "/api/demographics/{tier}/{entity_id}")
 def demographics(req, tier, entity_id):
+    if tier == "trends":  # registered first, so it shadows the trends route — delegate
+        return demographic_trends(req, entity_id)
     # demographics as_of is a source-vintage tag (acs5_2023, demo_2026), not a date:
-    # serve the latest vintage per variable; the vintage itself is in each row.
-    rows = db.query(
-        "SELECT category,variable,value,confidence,source,MAX(as_of) as_of FROM demographics "
-        "WHERE tier=? AND entity_id=? GROUP BY category,variable ORDER BY category,variable",
+    # per variable serve the best row — REAL beats synthetic, then latest vintage.
+    all_rows = db.query(
+        "SELECT category,variable,value,confidence,source,as_of,is_synthetic FROM demographics "
+        "WHERE tier=? AND entity_id=? ORDER BY category,variable,is_synthetic,as_of DESC",
         (tier, entity_id))
+    seen: dict[tuple, dict] = {}
+    for r in all_rows:  # first row per (category,variable) wins given the ORDER BY
+        seen.setdefault((r["category"], r["variable"]), r)
+    rows = list(seen.values())
     return {"tier": tier, "entity_id": entity_id, "as_of": _as_of(req), "rows": rows,
             "thin_coverage": len(rows) == 0}
 
@@ -164,7 +185,7 @@ def race_detail(req, id):
         "fundamentals": fund_latest(int(id), as_of),
         "forecast": {"model": live, "dem_prob": f and f["dem_prob"], "rep_prob": f and f["rep_prob"],
                      "metric_id": f and f["metric_id"], "visible": vis, "gate_reason": reason},
-        "narrative": narrative.generate(int(id)),
+        "narrative": narrative.cached(int(id)),
         "corroboration": corroboration.check(int(id)),
         "volatility": vol_latest(f"race:{id}", as_of),
     }
@@ -226,6 +247,8 @@ def polls(req):
         clauses.append("ps.name LIKE ?"); params.append("%" + req.query["pollster"] + "%")
     if req.query.get("population"):
         clauses.append("p.population=?"); params.append(req.query["population"])
+    if req.query.get("methodology"):
+        clauses.append("p.methodology LIKE ?"); params.append("%" + req.query["methodology"] + "%")
     if req.query.get("from"):
         clauses.append("p.field_end>=?"); params.append(req.query["from"])
     if req.query.get("to"):
@@ -320,7 +343,12 @@ def articles(req, entity_type, id):
            FROM article_entity_links l JOIN raw_items ri ON ri.id=l.raw_item_id
            JOIN sources s ON s.id=ri.source_id
            WHERE l.entity_type=? AND l.entity_id=? ORDER BY ri.published_at DESC LIMIT ?""",
-        (entity_type, id, limit))
+        (entity_type, id, limit * 3 if req.query.get("sort") == "relevance" else limit))
+    if req.query.get("sort") == "relevance" and rows:
+        from modeling.correlation import relevance_rank
+        label = _watch_label(entity_type, id)
+        ranked = relevance_rank(label, [{**r, "summary": r["title"] or ""} for r in rows], 10**9)
+        rows = [{k: v for k, v in r.items() if k != "summary"} for r in ranked][:limit]
     return rows
 
 
@@ -403,12 +431,92 @@ def volatility(req):
 @route("GET", "/api/stories")
 def stories(req):
     since = req.query.get("since", "1970-01-01")
-    rows = db.query("SELECT * FROM stories WHERE updated_at>? ORDER BY updated_at DESC LIMIT 50", (since,))
+    rows = db.query("SELECT * FROM stories WHERE updated_at>? AND date(created_at)<=? "
+                    "ORDER BY updated_at DESC LIMIT 50", (since, _as_of(req)))
     for s in rows:
         s["facts"] = db.query(
             "SELECT f.id, f.summary, f.category FROM story_facts sf JOIN extracted_facts f ON f.id=sf.fact_id "
             "WHERE sf.story_id=? ORDER BY f.id DESC LIMIT 10", (s["id"],))
     return rows
+
+
+@route("GET", "/api/stories/{id}")
+def story_detail(req, id):
+    """The event breakdown: the full fact cluster behind one story card."""
+    story = db.query_one("SELECT * FROM stories WHERE id=?", (id,))
+    if story is None:
+        return 404, {"error": "story not found"}
+    facts = db.query(
+        """SELECT f.id, f.summary, f.category, f.occurred_at, f.created_at, ri.url,
+                  COALESCE(json_extract(s.config_json,'$.outlet'), s.name) outlet, s.reliability_tier
+           FROM story_facts sf
+           JOIN extracted_facts f ON f.id = sf.fact_id
+           LEFT JOIN raw_items ri ON ri.id = f.raw_item_id
+           LEFT JOIN sources s ON s.id = ri.source_id
+           WHERE sf.story_id=? ORDER BY COALESCE(f.occurred_at, f.created_at) DESC""", (id,))
+    race = story["race_id"] and db.query_one("SELECT id, name FROM races WHERE id=?", (story["race_id"],))
+    return {"story": dict(story), "facts": facts, "race": race and dict(race)}
+
+
+@route("GET", "/api/briefings/latest")
+def briefing_latest(req):
+    row = db.query_one("SELECT as_of, body, model FROM daily_briefings WHERE as_of<=? "
+                       "ORDER BY as_of DESC LIMIT 1", (_as_of(req),))
+    if row is None:
+        return 404, {"error": "no briefing yet — generated by the nightly job"}
+    return dict(row)
+
+
+# ------------------------------ watchlist ------------------------------
+
+def _watch_label(entity_type: str, entity_id: str) -> str:
+    if entity_type == "race":
+        r = db.query_one("SELECT name FROM races WHERE id=?", (entity_id,))
+        return r["name"] if r else f"race #{entity_id}"
+    if entity_type == "state":
+        s = db.query_one("SELECT name FROM states WHERE fips_code=?", (entity_id,))
+        return s["name"] if s else entity_id
+    if entity_type == "candidate":
+        c = db.query_one("SELECT name FROM candidates WHERE id=?", (entity_id,))
+        return c["name"] if c else f"candidate #{entity_id}"
+    return f"{entity_type}:{entity_id}"
+
+
+@route("GET", "/api/watchlist")
+def watchlist(req):
+    rows = db.query("SELECT entity_type, entity_id FROM watchlist_items ORDER BY added_at DESC")
+    return [{"entity_type": r["entity_type"], "entity_id": r["entity_id"],
+             "label": _watch_label(r["entity_type"], r["entity_id"])} for r in rows]
+
+
+@route("POST", "/api/watchlist")
+def watchlist_add(req):
+    body = req.json or {}
+    if not body.get("entity_type") or body.get("entity_id") in (None, ""):
+        return 400, {"error": "entity_type and entity_id required"}
+    from core.util import now_iso
+    db.execute("INSERT OR IGNORE INTO watchlist_items(entity_type,entity_id,added_at) VALUES(?,?,?)",
+               (body["entity_type"], str(body["entity_id"]), now_iso()))
+    return 201, {"ok": True}
+
+
+@route("POST", "/api/watchlist/delete")
+def watchlist_delete(req):
+    body = req.json or {}
+    db.execute("DELETE FROM watchlist_items WHERE entity_type=? AND entity_id=?",
+               (body.get("entity_type", ""), str(body.get("entity_id", ""))))
+    return {"ok": True}
+
+
+@route("GET", "/api/demographics/trends/{race_id}")
+def demographic_trends(req, race_id):
+    """The coalition detector's output: which demographic variables explain the
+    most movement (API_CONTRACT.md route family that was missing until now)."""
+    from modeling.coalition import compute, latest
+    out = latest(int(race_id)) or compute(int(race_id))
+    if out is None:
+        return 404, {"error": "insufficient county history/demographics for this race yet"}
+    return out
 
 
 # ------------------------------ analyst ------------------------------
@@ -491,16 +599,43 @@ def map_values(req):
     if mode.startswith("demo:"):
         _, category, variable = mode.split(":", 2)
         db_tier = {"state": "state", "county": "county_equivalent", "district": "congressional_district"}[tier]
-        for r in db.query(
-                "SELECT entity_id, value, confidence, MAX(as_of) FROM demographics "
-                "WHERE tier=? AND category=? AND variable=? GROUP BY entity_id", (db_tier, category, variable)):
-            key = r["entity_id"]
-            if db_tier == "congressional_district":
-                d = db.query_one("SELECT geoid FROM congressional_districts WHERE district_version_id=?",
-                                 (key,))
-                key = d["geoid"] if d else key
-            values[key] = r["value"]
-            confidence[key] = r["confidence"]
+        # derived share modes: numerator/denominator computed from stored variables
+        SHARES = {"bachelors_share": ("education", "bachelors", "education", "pop_25plus"),
+                  "owner_share": ("housing_urbanicity", "owner_occupied", "housing_urbanicity", "occupied_units"),
+                  "nonwhite_share": ("race_ethnicity", "white_nh", "population_age", "total_population"),
+                  "foreign_born_share": ("social_nativity", "foreign_born", "population_age", "total_population")}
+
+        def _var_map(cat, var):
+            out = {}
+            for r in db.query(
+                    "SELECT entity_id, value, confidence FROM demographics WHERE tier=? AND category=? "
+                    "AND variable=? ORDER BY is_synthetic DESC, as_of", (db_tier, cat, var)):
+                out[r["entity_id"]] = r  # last row wins: real (is_synthetic=0) sorts last
+            return out
+
+        if variable in SHARES:
+            ncat, nvar, dcat, dvar = SHARES[variable]
+            nums, dens = _var_map(ncat, nvar), _var_map(dcat, dvar)
+            for eid, n in nums.items():
+                d = dens.get(eid)
+                if not d or not d["value"]:
+                    continue
+                share = 100.0 * n["value"] / d["value"]
+                if variable == "nonwhite_share":
+                    share = 100.0 - share
+                values[eid] = round(share, 1)
+                confidence[eid] = n["confidence"]
+        else:
+            for eid, r in _var_map(category, variable).items():
+                values[eid] = r["value"]
+                confidence[eid] = r["confidence"]
+        if db_tier == "congressional_district" and values:
+            remapped, remapped_conf = {}, {}
+            for eid, v in values.items():
+                d = db.query_one("SELECT geoid FROM congressional_districts WHERE district_version_id=?", (eid,))
+                remapped[d["geoid"] if d else eid] = v
+                remapped_conf[d["geoid"] if d else eid] = confidence.get(eid)
+            values, confidence = remapped, remapped_conf
         label = variable
     elif mode in ("partisan_lean", "average_margin", "forecast", "turnout"):
         rt = req.query.get("race_type", "senate" if tier == "state" else "house")
@@ -551,24 +686,44 @@ def map_values(req):
 
 @route("GET", "/api/map/pins")
 def map_pins(req):
-    return []  # populated as geocoded facts accumulate; kept cheap for now
+    """Live pins: recent geocoded facts + fresh polls + race calls, pinned at
+    the gazetteer centroid of their county (or state)."""
+    from core.gazetteer import centroid
+    pins = []
+    for f in db.query(
+            "SELECT id, summary, category, race_id, state_fips, county_geoid, created_at "
+            "FROM extracted_facts WHERE (state_fips IS NOT NULL OR county_geoid IS NOT NULL) "
+            "AND created_at >= datetime('now','-3 days') ORDER BY created_at DESC LIMIT 60"):
+        pt = (f["county_geoid"] and centroid("county", f["county_geoid"])) or \
+             (f["state_fips"] and centroid("state", f["state_fips"]))
+        if pt:
+            pins.append({"lat": round(pt[0], 4), "lon": round(pt[1], 4),
+                         "kind": "poll" if f["category"] == "polling" else "story",
+                         "label": f["summary"][:120], "race_id": f["race_id"], "ts": f["created_at"]})
+    for c in db.query(
+            "SELECT rc.race_id, rc.winner_party, rc.called_by, rc.called_at, r.state_fips "
+            "FROM race_calls rc JOIN races r ON r.id=rc.race_id "
+            "WHERE rc.called_at >= datetime('now','-3 days')"):
+        pt = c["state_fips"] and centroid("state", c["state_fips"])
+        if pt:
+            pins.append({"lat": round(pt[0], 4), "lon": round(pt[1], 4), "kind": "call",
+                         "label": f"CALLED {c['winner_party']} by {c['called_by']}",
+                         "race_id": c["race_id"], "ts": c["called_at"]})
+    return pins
 
 
 # ------------------------------ export ------------------------------
 
-_EXPORT_ALLOWED = {
-    "polls", "poll_results", "poll_averages", "races", "candidates", "parties", "demographics",
-    "political_history", "forecasts", "predictions", "backtest_results", "pollster_ratings",
-    "qualitative_factor_scores", "ensemble_weights", "ensemble_backtest_results", "stories",
-    "extracted_facts", "results_live", "race_calls", "volatility_scores", "chamber_simulations",
-    "redistricting_fairness_scores", "computation_audit_log", "states", "county_equivalents",
-    "congressional_districts", "electoral_vote_allocations", "second_order_links", "coalition_models",
-}
+def _export_tables() -> set[str]:
+    """'Open data, not a walled garden' — every real table exports. Only the
+    internal meta/chain-head store is excluded."""
+    return {r["name"] for r in db.query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} - {"app_meta"}
 
 
 @route("GET", "/api/export/{table}")
 def export(req, table):
-    if table not in _EXPORT_ALLOWED:
+    if table not in _export_tables():
         return 404, {"error": "unknown table"}
     limit = min(int(req.query.get("limit", 10000)), 100000)
     rows = db.query(f"SELECT * FROM {table} LIMIT ?", (limit,))

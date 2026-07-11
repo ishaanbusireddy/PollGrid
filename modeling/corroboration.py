@@ -31,6 +31,16 @@ def check(race_id: int) -> dict:
     if events["c"]:
         signals.append({"channel": "campaign_event_frequency", "direction": 0, "count": events["c"]})
 
+    # early-vote requests and voter-registration change — the remaining §07 channels;
+    # deterministic keyword counts over this race's cited facts, never a guess
+    for channel, pattern in (("early_vote_volume", "%early vot%"),
+                             ("voter_registration_change", "%voter registration%")):
+        row = db.query_one(
+            "SELECT COUNT(*) c FROM extracted_facts WHERE race_id=? AND lower(summary) LIKE ? "
+            "AND created_at >= datetime('now','-30 days')", (race_id, pattern))
+        if row["c"]:
+            signals.append({"channel": channel, "direction": 0, "count": row["c"]})
+
     spend = db.query_one("SELECT COUNT(*) c FROM ad_spend WHERE race_id=?", (race_id,))
     if spend["c"]:
         signals.append({"channel": "ad_spend", "direction": 0, "count": spend["c"]})

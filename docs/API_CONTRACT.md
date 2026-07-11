@@ -66,6 +66,14 @@ frontend must degrade to "district overlay unavailable").
 ## Export
 - `GET /api/export/{table}?format=csv|json&limit=` → raw table dump (any table; 404 unknown)
 
+## Stories, briefings & watchlist (v1.1 additions)
+- `GET /api/stories/{id}` → `{story:{id,headline,category,race_id,state_fips,score,created_at}, facts:[{id,summary,category,occurred_at,created_at,url,outlet,reliability_tier}], race:{id,name}|null}` — the event breakdown behind one feed card
+- `GET /api/briefings/latest` → `{as_of,body,model}` (404 until the nightly job generates one; `model:"deterministic"` when no LLM)
+- `GET /api/watchlist` → `[{entity_type,entity_id,label}]`
+- `POST /api/watchlist` body `{entity_type,entity_id}` → 201
+- `POST /api/watchlist/delete` body `{entity_type,entity_id}` → 200
+- `GET /api/demographics/trends/{race_id}` → coalition detector output `{coefficients,r2,n,as_of}` (404 if insufficient county history)
+
 ## WebSocket
 - `GET /ws/feed` (RFC 6455). Server pushes JSON frames:
   `{type:"story",payload:{story_card}}`, `{type:"poll",payload:{poll_row}}`,

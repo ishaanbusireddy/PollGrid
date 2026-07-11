@@ -23,7 +23,7 @@ def _feature_value(tier: str, entity_id: str, category: str, variable: str) -> f
     base = variable.replace("_share", "")
     row = db.query_one(
         "SELECT value FROM demographics WHERE tier=? AND entity_id=? AND category=? AND variable=? "
-        "ORDER BY as_of DESC LIMIT 1", (tier, entity_id, category, base))
+        "ORDER BY is_synthetic, as_of DESC LIMIT 1", (tier, entity_id, category, base))
     if row is None:
         return None
     if variable.endswith("_share"):
@@ -32,7 +32,7 @@ def _feature_value(tier: str, entity_id: str, category: str, variable: str) -> f
         denom_cat = "population_age" if denom_var == "total_population" else category
         d = db.query_one(
             "SELECT value FROM demographics WHERE tier=? AND entity_id=? AND category=? AND variable=? "
-            "ORDER BY as_of DESC LIMIT 1", (tier, entity_id, denom_cat, denom_var))
+            "ORDER BY is_synthetic, as_of DESC LIMIT 1", (tier, entity_id, denom_cat, denom_var))
         if not d or not d["value"]:
             return None
         return row["value"] / d["value"]

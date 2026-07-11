@@ -102,8 +102,11 @@ def relevance_rank(query_text: str, facts: list[dict], budget_tokens: int) -> li
     same embedding mechanism, recency the tiebreak only among similar relevance —
     never a blind first-N cutoff."""
     qv = _vec(query_text)
-    scored = sorted(facts, key=lambda f: (-round(cosine(qv, _vec(f.get("summary", ""))), 2),
-                                          f.get("created_at", "")), )
+    # relevance first; recency is the tiebreak among similar relevance (newest wins)
+    with_scores = [(round(cosine(qv, _vec(f.get("summary", ""))), 2), f.get("created_at") or "", f)
+                   for f in facts]
+    with_scores.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    scored = [f for _, _, f in with_scores]
     out, used = [], 0
     for f in scored:
         cost = max(1, len(f.get("summary", "")) // 4)

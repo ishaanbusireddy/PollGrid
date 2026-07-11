@@ -16,15 +16,14 @@ from modeling import fundamentals as fdx
 from modeling.audit import record
 from modeling.averaging import latest_average
 
-# Logistic scale: ~6 pts of margin ≈ 80% win probability, a deliberately
-# conservative mapping stated in the audit trail for every number.
-MARGIN_SCALE = 4.0
-FUND_WEIGHT_NO_POLLS = 1.0
-FUND_WEIGHT_WITH_POLLS = 0.35
+# Logistic scale (config: forecasting.margin_scale): ~6 pts of margin ≈ 80%
+# win probability by default — a conservative mapping stated in every audit row.
+def MARGIN_SCALE() -> float:
+    return cfg("forecasting.margin_scale")
 
 
 def _probability(margin_pts: float) -> float:
-    return 1.0 / (1.0 + math.exp(-margin_pts / MARGIN_SCALE))
+    return 1.0 / (1.0 + math.exp(-margin_pts / MARGIN_SCALE()))
 
 
 def compute(race_id: int, as_of: str | None = None) -> dict | None:
@@ -44,13 +43,13 @@ def compute(race_id: int, as_of: str | None = None) -> dict | None:
         blended = fund_margin
         formula = "margin = fundamentals_score*10 (no qualifying polls)"
     else:
-        w = FUND_WEIGHT_WITH_POLLS
+        w = cfg("forecasting.fundamentals_weight_with_polls")
         blended = (1 - w) * poll_margin + w * fund_margin
         formula = f"margin = {1-w:.2f}*poll_margin + {w:.2f}*fundamentals_margin"
     dem_prob = round(_probability(blended), 4)
     metric_id = record(
         "forecast", f"race:{race_id}",
-        formula + f"; p = 1/(1+exp(-margin/{MARGIN_SCALE}))",
+        formula + f"; p = 1/(1+exp(-margin/{MARGIN_SCALE()}))",
         {"as_of": as_of, "poll_margin": poll_margin, "fund_margin": fund_margin,
          "avg_metric": avg and avg["metric_id"], "fund_metric": fund and fund["metric_id"]},
         {"dem_prob": dem_prob})
@@ -75,17 +74,32 @@ def latest(race_id: int, model: str = "quantitative", as_of: str | None = None) 
 # ------------------------- the Brier backtest gate -------------------------
 
 def grade_predictions() -> int:
-    """Grade every ungraded prediction whose race has a human call. Pure SQL +
-    arithmetic; the replay can't peek because grading only ever sees races
-    already called."""
-    rows = db.query(
-        "SELECT p.id, p.probs_json, rc.winner_party FROM predictions p "
-        "JOIN race_calls rc ON rc.race_id=p.race_id WHERE p.graded_outcome IS NULL "
-        "AND p.as_of < date(rc.called_at)")
-    for r in rows:
+    """Grade every ungraded prediction against ground truth. Two truth sources,
+    pure SQL + arithmetic, no peeking (a prediction only grades against an
+    outcome dated after it): (1) human race calls; (2) the certified archive —
+    a real (never synthetic) political_history row for the race's office/
+    state/cycle, which is how OpenElections-imported certified results grade
+    the replay even when nobody clicked CALL."""
+    n = 0
+    for r in db.query(
+            "SELECT p.id, p.probs_json, rc.winner_party FROM predictions p "
+            "JOIN race_calls rc ON rc.race_id=p.race_id WHERE p.graded_outcome IS NULL "
+            "AND p.as_of < date(rc.called_at)"):
         db.execute("UPDATE predictions SET graded_outcome=?, graded_at=datetime('now') WHERE id=?",
                    (r["winner_party"], r["id"]))
-    return len(rows)
+        n += 1
+    for r in db.query(
+            """SELECT p.id, ph.winner_party FROM predictions p
+               JOIN races r ON r.id = p.race_id
+               JOIN political_history ph ON ph.tier='state' AND ph.entity_id=r.state_fips
+                    AND ph.office=r.race_type AND ph.cycle_year=r.cycle_year
+                    AND ph.is_synthetic=0 AND ph.confidence='measured'
+               WHERE p.graded_outcome IS NULL AND ph.winner_party IS NOT NULL
+                 AND p.as_of <= (r.cycle_year || '-11-30')"""):
+        db.execute("UPDATE predictions SET graded_outcome=?, graded_at=datetime('now') WHERE id=?",
+                   (r["winner_party"], r["id"]))
+        n += 1
+    return n
 
 
 def backtest(as_of: str | None = None) -> list[dict]:

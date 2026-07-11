@@ -164,8 +164,13 @@ def _f_turnout_ground_game(race: dict) -> float:
 # taxonomy: key -> (name, family, grounding, method, impl_or_rubric)
 FACTORS: dict[str, dict] = {
     "retrospective_economy": {
-        "name": "Retrospective / economic voting", "family": "retrospective",
-        "grounding": "Fiorina's retrospective-voting theory", "method": "llm_rubric",
+        "name": "Retrospective / economic voting (measured)", "family": "retrospective",
+        "grounding": "Fiorina's retrospective-voting theory — the real indicator trend (BLS)",
+        "method": "deterministic", "impl": lambda race: _f_economic(race)},
+    "retrospective_sentiment": {
+        "name": "Retrospective / economic voting (perceived)", "family": "retrospective",
+        "grounding": "Fiorina — perceived economy, which can diverge from the raw indicator",
+        "method": "llm_rubric",
         "rubric": "From the cited facts only: does perceived-economy sentiment in this race's coverage "
                   "favor the incumbent party (score toward its side) or punish it? " + RUBRIC_SCALE},
     "anti_incumbency": {
@@ -251,6 +256,62 @@ FACTORS: dict[str, dict] = {
         "grounding": "Endorsement-effect research; backtest decides which types matter",
         "method": "deterministic", "impl": _f_endorsements},
 }
+
+
+def _f_economic(race: dict) -> float:
+    """The measured half of retrospective voting: the BLS-derived, president-
+    party-oriented index maintained by ingestion/economics.py."""
+    row = db.query_one("SELECT value FROM app_meta WHERE key='economic_index'")
+    return max(-1.0, min(1.0, float(row["value"]))) if row else 0.0
+
+
+def _f_ethnic_composition(race: dict) -> float:
+    """Deterministic composition (race/ethnicity share) — magnitude only, per
+    the manual's explicit non-monolithic caution: never assumes a bloc's vote."""
+    tier, ent = ("state", race["state_fips"]) if race["state_fips"] else ("nation", "US")
+    white = db.query_one("SELECT value FROM demographics WHERE tier=? AND entity_id=? "
+                         "AND variable='white_nh' ORDER BY is_synthetic, as_of DESC LIMIT 1", (tier, ent))
+    total = db.query_one("SELECT value FROM demographics WHERE tier=? AND entity_id=? "
+                         "AND variable='total_population' ORDER BY is_synthetic, as_of DESC LIMIT 1", (tier, ent))
+    if not white or not total or not total["value"]:
+        return 0.0
+    nonwhite_share = 1.0 - white["value"] / total["value"]
+    return min(1.0, max(0.0, nonwhite_share))  # salience magnitude, not direction
+
+
+def _f_weather(race: dict) -> float:
+    """Weather-and-turnout: deterministic NOAA correlation per the manual —
+    returns neutral 0 until the NOAA historical import lands (honest absence,
+    never a guess). The factor exists so the taxonomy and the ensemble's
+    feature vector match the manual's full table."""
+    row = db.query_one("SELECT value FROM app_meta WHERE key=?",
+                       (f"weather_turnout:{race['state_fips'] or 'US'}",))
+    return max(-1.0, min(1.0, float(row["value"]))) if row else 0.0
+
+
+FACTORS.update({
+    "religious_blocs": {
+        "name": "Religious/denominational blocs", "family": "demographic",
+        "grounding": "Denominational voting-bloc research (explicitly non-monolithic; "
+                     "Pew Religious Landscape is the composition source once imported)",
+        "method": "llm_rubric",
+        "rubric": "From the cited facts only: is religious-community salience a live factor in this "
+                  "race's coverage, and which side does it favor? Narrative salience only — never "
+                  "assume a bloc votes as one. " + RUBRIC_SCALE},
+    "ethnic_community": {
+        "name": "Ethnic/community voting patterns", "family": "demographic",
+        "grounding": "Voting-bloc research with the explicit non-monolithic caution",
+        "method": "deterministic", "impl": _f_ethnic_composition},
+    "charisma": {
+        "name": "Candidate charisma / personality", "family": "candidate",
+        "grounding": "Valence-politics candidate-quality research", "method": "llm_rubric",
+        "rubric": "From the cited facts only: score tone/authenticity as portrayed in debate and "
+                  "interview coverage — which candidate's personal appeal reads stronger? " + RUBRIC_SCALE},
+    "weather_turnout": {
+        "name": "Weather-and-turnout effects", "family": "events",
+        "grounding": "Documented election-day weather/turnout correlation (NOAA historical data)",
+        "method": "deterministic", "impl": _f_weather},
+})
 
 
 def score_race(race_id: int, as_of: str | None = None) -> list[dict]:

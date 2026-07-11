@@ -79,29 +79,21 @@ def _district_entity_id(state_fips: str, cd_code: str) -> str | None:
     return str(row["district_version_id"]) if row else None
 
 
-@register("census")
-def run(source: dict) -> None:
-    key = os.environ.get(source["api_key_env"] or "") or None
-    base = source["url"]
+def _sync_national(base: str, key: str | None) -> None:
+    """Nation row + the full state tier (two calls)."""
+    data = _fetch(base, "us:*", None, key)
+    header, row = data[0], data[1]
+    _store("nation", "US", dict(zip(header, row)))
+    data = _fetch(base, "state:*", None, key)
+    header = data[0]
+    for row in data[1:]:
+        rec = dict(zip(header, row))
+        if rec["state"] in STATES:
+            _store("state", rec["state"], rec)
 
-    cursor = db.meta_get("census_cursor", "nation")
-    state_fipses = [f for f, (_, _, terr) in sorted(STATES.items()) if not terr]
 
-    if cursor == "nation":
-        data = _fetch(base, "us:*", None, key)
-        header, row = data[0], data[1]
-        _store("nation", "US", dict(zip(header, row)))
-        data = _fetch(base, "state:*", None, key)
-        header = data[0]
-        for row in data[1:]:
-            rec = dict(zip(header, row))
-            if rec["state"] in STATES:
-                _store("state", rec["state"], rec)
-        db.meta_set("census_cursor", state_fipses[0])
-        return
-
-    # per-state pass: counties + districts for one state per run, then advance
-    st = cursor if cursor in state_fipses else state_fipses[0]
+def _sync_state(base: str, st: str, key: str | None) -> None:
+    """One state's counties + congressional districts (two calls)."""
     data = _fetch(base, "county:*", f"state:{st}", key)
     header = data[0]
     for row in data[1:]:
@@ -115,6 +107,44 @@ def run(source: dict) -> None:
         if eid:
             _store("congressional_district", eid, rec)
 
+
+def _bootstrap(base: str, key: str | None, state_fipses: list[str]) -> None:
+    """First run only: nation + state tier + EVERY state's counties and districts
+    back-to-back — ~104 budget-checked calls, well inside the 400/day census
+    budget — so full coverage lands on day one instead of ~50 days of rotation.
+    Each _fetch still budget.spend()s; if the budget somehow runs dry the
+    BudgetExhausted propagates, the done-flag stays unset, and the whole
+    bootstrap re-runs next tick (all inserts are INSERT OR IGNORE, so it is
+    safe to repeat). Pack invalidation runs once at the end, not per state."""
+    _sync_national(base, key)
+    for st in state_fipses:
+        _sync_state(base, st, key)
+    db.meta_set("census_bootstrap_done", today())
+    db.meta_set("census_last_full_sync", today())
+    db.meta_set("census_cursor", state_fipses[0])  # daily refresh rotation starts here
+    for st in state_fipses:
+        _invalidate_touched(st)
+
+
+@register("census")
+def run(source: dict) -> None:
+    key = os.environ.get(source["api_key_env"] or "") or None
+    base = source["url"]
+    state_fipses = [f for f, (_, _, terr) in sorted(STATES.items()) if not terr]
+
+    if not db.meta_get("census_bootstrap_done"):
+        _bootstrap(base, key, state_fipses)
+        return
+
+    cursor = db.meta_get("census_cursor", "nation")
+    if cursor == "nation":
+        _sync_national(base, key)
+        db.meta_set("census_cursor", state_fipses[0])
+        return
+
+    # per-state pass: counties + districts for one state per run, then advance
+    st = cursor if cursor in state_fipses else state_fipses[0]
+    _sync_state(base, st, key)
     nxt = state_fipses[(state_fipses.index(st) + 1) % len(state_fipses)]
     db.meta_set("census_cursor", nxt)
     if nxt == state_fipses[0]:

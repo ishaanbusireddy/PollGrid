@@ -1,7 +1,8 @@
-/* CommandPalette.js — Ctrl/Cmd+K fuzzy jump to any race, candidate, or state.
-   States are matched client-side from the vendored boundary file; races and
-   candidates are queried live (/api/races, /api/candidates?query=) and
-   degrade silently to states-only when the backend is down. */
+/* CommandPalette.js — Ctrl/Cmd+K fuzzy jump to any race, candidate, state,
+   or territory. States are matched client-side from the vendored boundary
+   file, DC & the territories from the static list in the bag (they have no
+   map geometry to click); races and candidates are queried live (/api/races,
+   /api/candidates?query=) and degrade silently when the backend is down. */
 
 function fuzzyScore(query, target) {
   // subsequence match, rewarding starts-with and word boundaries
@@ -66,9 +67,17 @@ export class CommandPalette {
 
   async _query(q) {
     const results = [];
+    const seenFips = new Set();
     for (const s of this.bag.states) {
+      seenFips.add(s.key);
       const sc = fuzzyScore(q, s.name);
       if (sc >= 0) results.push({ kind: 'state', label: s.name, score: sc, hash: `#/state/${s.key}` });
+    }
+    // DC & territories — indexed by full name AND USPS code (no geometry needed)
+    for (const t of this.bag.territories || []) {
+      if (seenFips.has(t.key)) continue; // already indexed from the boundary file
+      const sc = Math.max(fuzzyScore(q, t.name), fuzzyScore(q, t.usps || ''));
+      if (sc >= 0) results.push({ kind: 'territory', label: t.name, score: sc, hash: `#/state/${t.key}` });
     }
     const token = (this._token = Symbol());
     // remote sources, silently absent when the backend is down

@@ -9,10 +9,18 @@ from core import db
 from core.util import now_iso, today
 
 
+def _active_races() -> list[int]:
+    """Races the nightly deepens: anything polled, competitive, or live."""
+    return [r["id"] for r in db.query(
+        "SELECT DISTINCT id FROM races WHERE id IN (SELECT race_id FROM poll_averages) "
+        "OR competitiveness IN ('tossup','lean') OR status IN ('live','callable')")]
+
+
 def run() -> dict:
-    from modeling import averaging, chamber_simulation, coalition, correlation, forecasting, \
-        genius_ensemble, pollster_ratings, volatility
+    from modeling import averaging, chamber_simulation, coalition, correlation, factors_taxonomy, \
+        forecasting, genius_ensemble, narrative, pollster_ratings, rhetoric, volatility
     report: dict = {"started": now_iso()}
+    active = _active_races()
     steps = [
         ("pollster_ratings", lambda: pollster_ratings.refresh()),
         ("poll_averages", lambda: averaging.run_all()),
@@ -20,17 +28,29 @@ def run() -> dict:
             "SELECT DISTINCT race_id id FROM poll_averages UNION "
             "SELECT id FROM races WHERE race_type != 'generic_ballot' LIMIT 600")
             if forecasting.compute(r["id"]))),
+        # the genius layer's production loop (audit #14/#15): re-score the factor
+        # vector for active races, then produce ensemble forecasts wherever
+        # fitted weights exist — the gate decides what is shown, never this step
+        ("factor_scorecards", lambda: sum(1 for rid in active if factors_taxonomy.score_race(rid))),
+        ("ensemble_forecasts", lambda: sum(1 for rid in active if genius_ensemble.predict(rid))),
+        ("candidate_stances", lambda: sum(rhetoric.score_stances(c["id"]) for c in db.query(
+            "SELECT DISTINCT rc.candidate_id id FROM race_candidates rc "
+            "WHERE rc.race_id IN (%s)" % (",".join(map(str, active)) or "NULL")))),
+        ("race_narratives", lambda: sum(1 for rid in active if narrative.refresh_cache(rid))),
         ("grade_predictions", forecasting.grade_predictions),
         ("backtest", lambda: len(forecasting.backtest())),
         ("volatility_national", lambda: volatility.compute("national")["score"]),
+        ("volatility_races", lambda: sum(1 for rid in active if volatility.compute(f"race:{rid}"))),
         ("second_order_links", correlation.find_second_order_links),
         ("coalitions", lambda: sum(1 for r in db.query(
             "SELECT DISTINCT race_id id FROM poll_averages") if coalition.compute(r["id"]))),
         ("chamber_senate", lambda: (chamber_simulation.run("senate") or {}).get("dem_control_prob")),
         ("chamber_house", lambda: (chamber_simulation.run("house") or {}).get("dem_control_prob")),
+        ("chamber_ec", lambda: (chamber_simulation.run("ec") or {}).get("dem_control_prob")),
         ("ensemble_refit", lambda: genius_ensemble.refit()),
         ("ensemble_gates", lambda: [genius_ensemble.gate(c["race_type"]) for c in
                                     db.query("SELECT DISTINCT race_type FROM races")]),
+        ("daily_briefing", lambda: (__import__("modeling.briefing", fromlist=["generate"]).generate() or {}).get("model")),
         ("integrity", db.run_integrity_checks),
     ]
     for name, fn in steps:
