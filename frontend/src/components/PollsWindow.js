@@ -10,6 +10,8 @@
    state/district polls as "covering" the county — a poll belongs to the race
    it was fielded for, not to a click. */
 
+import { skeleton } from '../anim.js';
+
 export function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -131,7 +133,8 @@ export class PollsWindow {
   async load() {
     const box = this.el.querySelector('.polls-results');
     if (!box) return;
-    box.innerHTML = '<div class="dim">loading…</div>';
+    box.innerHTML = '';
+    box.appendChild(skeleton(8, { table: true }));
     const res = await this.bag.api.polls({ ...this.filters, limit: PAGE, offset: this.offset });
     if (!box.isConnected) return;
     box.innerHTML = '';

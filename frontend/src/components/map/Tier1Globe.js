@@ -28,6 +28,20 @@ import { CITY_LIGHTS } from './cities.js';
 import { themePalette, rampColor } from './geometry.js';
 
 const COUNTY_LOD_ZOOM = 3.4;
+const G_ZOOM_MIN = 1.3, G_ZOOM_MAX = 30;
+
+/* game-style keyboard nav (shared with Tier2): WASD/arrows pan, Q/E and +/- zoom */
+const NAV_KEYS = new Set([
+  'w', 'a', 's', 'd', 'q', 'e',
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+  '+', '=', '-', '_',
+]);
+
+function isTypingTarget(t) {
+  if (!t) return false;
+  const tag = t.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+}
 
 /* ---------------- shaders ---------------- */
 
@@ -257,6 +271,8 @@ export class Tier1Globe {
     // camera
     this.cam = { lat: 39, lon: -97.5, zoom: 2.05 };
     this.flight = null;
+    this._keys = new Set();                  // currently-held nav keys
+    this._navRaf = null;                     // rAF handle, live ONLY while a key is held
 
     // layers
     this.states = { features: statesGeo.features, info: statesGeo.features.map(featureInfo) };
@@ -531,7 +547,7 @@ export class Tier1Globe {
     this._onWheel = (e) => {
       e.preventDefault();
       const f = Math.exp(-e.deltaY * 0.0012);
-      this.cam.zoom = Math.max(1.3, Math.min(30, this.cam.zoom * f));
+      this.cam.zoom = Math.max(G_ZOOM_MIN, Math.min(G_ZOOM_MAX, this.cam.zoom * f));
       this.flight = null;
     };
     this._onLeave = () => { this._hoverXY = null; this.hooks.onHover && this.hooks.onHover(null); };
@@ -540,8 +556,51 @@ export class Tier1Globe {
     c.addEventListener('pointerup', this._onUp);
     c.addEventListener('wheel', this._onWheel, { passive: false });
     c.addEventListener('pointerleave', this._onLeave);
+    // keyboard nav is document-wide (the canvas isn't focusable); ignored while typing
+    this._onKeyDown = (e) => {
+      if (isTypingTarget(e.target)) return;
+      const k = e.key.toLowerCase();
+      if (!NAV_KEYS.has(k)) return;
+      e.preventDefault();
+      if (!this._keys.has(k)) { this._keys.add(k); this._startNav(); }
+    };
+    this._onKeyUp = (e) => { this._keys.delete(e.key.toLowerCase()); };
+    this._onBlur = () => { this._keys.clear(); };
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+    window.addEventListener('blur', this._onBlur);
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
+  }
+
+  /* Key-gated rAF: starts on the first keydown, self-stops when every key is
+     released — never a permanent loop of its own. WASD/arrows orbit the globe
+     (lat/lon), Q/E and +/- zoom, all within the existing camera clamps. */
+  _startNav() {
+    if (this._navRaf != null) return;
+    this._navLast = performance.now();
+    this._navRaf = requestAnimationFrame((t) => this._navFrame(t));
+  }
+
+  _navFrame(now) {
+    if (!this._keys.size) { this._navRaf = null; return; }
+    const dt = Math.min(0.05, (now - (this._navLast || now)) / 1000);
+    this._navLast = now;
+    const has = (k) => this._keys.has(k);
+    // pan slows as you zoom in, so it feels the same on screen
+    const panDeg = (70 / this.cam.zoom) * dt * 60 * 0.5;
+    let dLon = 0, dLat = 0;
+    if (has('a') || has('arrowleft')) dLon -= 1;
+    if (has('d') || has('arrowright')) dLon += 1;
+    if (has('w') || has('arrowup')) dLat += 1;
+    if (has('s') || has('arrowdown')) dLat -= 1;
+    if (dLon) { this.cam.lon = this._clampLon(this.cam.lon + dLon * panDeg); this.flight = null; }
+    if (dLat) { this.cam.lat = Math.max(5, Math.min(74, this.cam.lat + dLat * panDeg)); this.flight = null; }
+    let zf = 0;
+    if (has('e') || has('+') || has('=')) zf += 1;
+    if (has('q') || has('-') || has('_')) zf -= 1;
+    if (zf) { this.cam.zoom = Math.max(G_ZOOM_MIN, Math.min(G_ZOOM_MAX, this.cam.zoom * Math.exp(zf * 1.6 * dt))); this.flight = null; }
+    this._navRaf = requestAnimationFrame((t) => this._navFrame(t));
   }
 
   _clampLon(lon) { return Math.max(-179, Math.min(-45, lon)); }
@@ -708,7 +767,11 @@ export class Tier1Globe {
       gl.drawArrays(gl.LINES, 0, mesh.nLines);
     };
 
-    if (this.showCounties && this.countyMesh) {
+    if (this.choropleth.tier === 'district' && this.districtMesh) {
+      // House mode: fill congressional districts, keep state outlines for context
+      drawFill(this.districtMesh);
+      drawLines(this.stateMesh, [pal.accent[0] / 255, pal.accent[1] / 255, pal.accent[2] / 255, 0.7], 0.004);
+    } else if (this.showCounties && this.countyMesh) {
       drawFill(this.countyMesh);
       drawLines(this.countyMesh, [pal.line[0] / 255, pal.line[1] / 255, pal.line[2] / 255, 0.5], 0.003);
       drawLines(this.stateMesh, [pal.accent[0] / 255, pal.accent[1] / 255, pal.accent[2] / 255, 0.85], 0.004);
@@ -770,7 +833,11 @@ export class Tier1Globe {
 
   destroy() {
     cancelAnimationFrame(this._raf);
+    if (this._navRaf != null) { cancelAnimationFrame(this._navRaf); this._navRaf = null; }
     window.removeEventListener('resize', this._onResize);
+    window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keyup', this._onKeyUp);
+    window.removeEventListener('blur', this._onBlur);
     const c = this.canvas;
     c.removeEventListener('pointerdown', this._onDown);
     c.removeEventListener('pointermove', this._onMove);

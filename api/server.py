@@ -146,10 +146,11 @@ def bootstrap(start_ingestion: bool = False) -> None:
     from core import db
     db.migrate()
 
-    from domain import entities, geography, races
+    from domain import entities, geography, influence, races
     geography.seed()
     entities.seed()
     races.seed()
+    influence.seed()
     from ingestion import sources_seed
     sources_seed.seed()
 

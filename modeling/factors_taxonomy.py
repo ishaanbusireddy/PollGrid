@@ -311,6 +311,15 @@ FACTORS.update({
         "name": "Weather-and-turnout effects", "family": "events",
         "grounding": "Documented election-day weather/turnout correlation (NOAA historical data)",
         "method": "deterministic", "impl": _f_weather},
+    "rhetoric_factcheck": {
+        "name": "Rhetoric accuracy / fact-check exposure", "family": "signals",
+        "grounding": "Misinformation-correction research: repeated documented falsehoods carry "
+                     "late-cycle correction risk (addendum §7 — scored from cited rhetoric facts only)",
+        "method": "llm_rubric",
+        "rubric": "From the cited rhetoric/debate facts only: is either candidate's rhetoric drawing "
+                  "documented fact-check contradictions IN THE CITED FACTS (never your own knowledge)? "
+                  "Score toward the side with the cleaner record; 0 if no fact-check signal is cited. "
+                  + RUBRIC_SCALE},
 })
 
 

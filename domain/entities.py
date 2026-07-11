@@ -56,6 +56,25 @@ CURATED_CANDIDATES = [
 ]
 
 
+# Curated portrait floor — Wikimedia Commons Special:FilePath (stable URL from a
+# file's plain name; the GlobeGrid pattern). Best-known official-portrait file
+# names; a miss renders the frontend's initials avatar, never a broken page.
+_P = "https://commons.wikimedia.org/wiki/Special:FilePath/"
+CURATED_PORTRAITS = {
+    "Gavin Newsom": _P + "Gavin_Newsom_official_photo.jpg?width=480",
+    "Greg Abbott": _P + "Greg_Abbott_2015.jpg?width=480",
+    "Kathy Hochul": _P + "Kathy_Hochul,_official_portrait,_117th_Congress.jpg?width=480",
+    "JB Pritzker": _P + "J._B._Pritzker_(cropped).jpg?width=480",
+    "Ron DeSantis": _P + "Ron_DeSantis,_official_portrait,_115th_Congress.jpg?width=480",
+    "Gretchen Whitmer": _P + "Gretchen_Whitmer_official_photo.jpg?width=480",
+    "Josh Shapiro": _P + "Josh_Shapiro_official_portrait.jpg?width=480",
+    "Brian Kemp": _P + "Brian_Kemp_official_photo.jpg?width=480",
+    "Susan Collins": _P + "Susan_Collins,_official_portrait,_116th_Congress.jpg?width=480",
+    "Jon Ossoff": _P + "Jon_Ossoff_official_portrait.jpg?width=480",
+    "Bernie Sanders": _P + "Bernie_Sanders.jpg?width=480",
+}
+
+
 def seed() -> None:
     with db.write() as conn:
         for code, name, color, summary, citation in PARTIES:
@@ -67,6 +86,9 @@ def seed() -> None:
                 "bio,curated,citation) SELECT ?,?,?,?,?,?,1,? WHERE NOT EXISTS "
                 "(SELECT 1 FROM candidates WHERE name=? AND state_fips=?)",
                 (name, party, USPS_TO_FIPS[usps], office, dist, bio, citation, name, USPS_TO_FIPS[usps]))
+        for cand_name, url in CURATED_PORTRAITS.items():  # after inserts, so fresh DBs get them too
+            conn.execute("UPDATE candidates SET portrait_url=? WHERE name=? AND portrait_url IS NULL",
+                         (url, cand_name))
 
 
 def sync_merge_candidate(fec_id: str, name: str, party_code: str | None, state_fips: str | None,

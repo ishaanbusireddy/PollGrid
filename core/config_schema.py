@@ -26,7 +26,11 @@ SCHEMA: dict = {
             "max_backoff_seconds": (int, 60, 86400),
             "down_after_failures": (int, 1, 100),
         },
-        "budgets": {k: (int, 1, 1000000) for k in ("census", "fec", "congress_gov", "targeted_search")},
+        "budgets": {k: (int, 1, 1000000) for k in ("census", "fec", "congress_gov", "targeted_search", "lda")},
+        "news_recency_hours": (int, 1, 720),
+        "debate_window": {"poll_seconds": (int, 30, 3600)},
+        "social_x": {"enabled": (bool, None, None), "api_key_env": (str, None, None),
+                     "handles": ("list", str)},
     },
     "polling": {
         "averaging": {
@@ -34,7 +38,10 @@ SCHEMA: dict = {
             "house_effect_adjustment": (bool, None, None),
             "min_sample_size": (int, 0, 100000),
             "weight_by_sample_size": (bool, None, None),
-        }
+            "herding_discount": (bool, None, None),
+            "herding_window_days": (int, 1, 14),
+        },
+        "regional_ratings_min_graded": (int, 1, 1000),
     },
     "fundamentals": {
         "weights": {
@@ -65,6 +72,7 @@ SCHEMA: dict = {
         "l1_ratio": (float, 0.0, 1.0),
         "alpha": (float, 0.0, 100.0),
         "context_pack_token_budget": (int, 1000, 250000),
+        "event_rescore_min_gap_minutes": (int, 1, 1440),
     },
     "llm_provider": {
         "primary": (str, None, None),

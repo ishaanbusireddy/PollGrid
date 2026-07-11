@@ -27,6 +27,7 @@
 import { composeSnapshot, downloadCanvas, downloadText } from './Snapshot.js';
 import { escapeHtml } from './PollsWindow.js';
 import { themePalette, mix } from './map/geometry.js';
+import { animateNumber } from '../anim.js';
 
 export const OUTCOMES = [
   { key: 'safe_d', label: 'Safe D' }, { key: 'likely_d', label: 'Likely D' },
@@ -541,9 +542,16 @@ export class MapBuilder {
     const tgt = this._target();
     const total = Math.max(1, t.d + t.r + t.tossup + t.other);
     const pal = themePalette();
-    const seg = (v, color) => v ? `<span class="seg" style="flex:${v};background:rgb(${color[0]},${color[1]},${color[2]});color:${this._textOn(color)}">${v}</span>` : '';
+    const seg = (k, v, color) => v ? `<span class="seg" data-k="${k}" style="flex:${v};background:rgb(${color[0]},${color[1]},${color[2]});color:${this._textOn(color)}">${v}</span>` : '';
     bar.innerHTML =
-      seg(t.d, pal.dem) + seg(t.tossup, mix(pal.neutral, pal.bg, 0.2)) + seg(t.other, pal.other) + seg(t.r, pal.rep);
+      seg('d', t.d, pal.dem) + seg('tossup', t.tossup, mix(pal.neutral, pal.bg, 0.2)) + seg('other', t.other, pal.other) + seg('r', t.r, pal.rep);
+    // count-up ticks: each topline segment animates from its previous value
+    const prev = this._prevTotals || {};
+    for (const s of bar.querySelectorAll('.seg[data-k]')) {
+      const k = s.dataset.k;
+      if (prev[k] != null && prev[k] !== t[k]) animateNumber(s, prev[k], t[k], 400, (v) => String(Math.round(v)));
+    }
+    this._prevTotals = { ...t };
     const note = this.root.querySelector('.topline-note');
     note.textContent = `D ${t.d} · Tossup ${t.tossup} · Other ${t.other} · R ${t.r}  —  ${tgt.win} ${tgt.unit} to win` +
       (t.d >= tgt.win ? '  ✓ D majority' : t.r >= tgt.win ? '  ✓ R majority' : '');

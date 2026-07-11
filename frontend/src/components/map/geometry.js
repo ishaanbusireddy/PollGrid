@@ -201,8 +201,12 @@ export function makeAlbersUsa() {
   const hawaii  = albersFactory(8, 18, -157.5, 20.5, k, cx - 0.19 * k, cy + 0.212 * k);
   const pr      = albersFactory(8, 18, -66.4, 18.2, k, cx + 0.36 * k, cy + 0.21 * k);
   return (lon, lat) => {
+    // Hawaii threshold is lat < 30 (not 25): HI-02 includes the Northwestern
+    // Hawaiian Islands up to ~28.5°N — at lat < 25 those points routed to the
+    // mainland projection while the main islands routed to the inset, drawing a
+    // line between them. lat<30 & lon<-140 is open Pacific, only Hawaii is there.
     if (lat > 50 && (lon < -128 || lon > 165)) return alaska(lon, lat);
-    if (lat < 25 && lon < -140) return hawaii(lon, lat);
+    if (lat < 30 && lon < -140) return hawaii(lon, lat);
     if (lat < 20 && lon > -70) return pr(lon, lat);
     return lower48(lon, lat);
   };

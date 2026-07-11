@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PollGrid</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='16'%20height='16'%3E%3Crect%20width='16'%20height='16'%20rx='3'%20fill='%232456a6'/%3E%3Ctext%20x='8'%20y='12'%20font-size='11'%20text-anchor='middle'%20fill='white'%20font-family='serif'%3EP%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body data-theme="newsroom">
@@ -12,6 +13,7 @@
     <div class="wordmark" title="PollGrid — US political intelligence">
       <span class="wordmark-glyph">&#x26CA;</span>
       <span class="wordmark-text">Poll<b>Grid</b></span>
+      <span class="version-badge" id="version-badge" title="platform version">v3.0</span>
     </div>
 
     <nav id="topnav" class="topnav">
@@ -19,7 +21,9 @@
       <a href="#/polls">Polls</a>
       <a href="#/builder">Builder</a>
       <a href="#/scorecard">Scorecard</a>
+      <a href="#/lobbies">Influence</a>
       <a href="#/analyst">Analyst</a>
+      <a href="#/settings">Settings</a>
       <a href="#/diagnostics">Status</a>
     </nav>
 
@@ -37,6 +41,8 @@
       <span class="palette-hint" id="palette-hint" title="Command palette">Ctrl+K</span>
     </div>
   </header>
+
+  <div id="chyron" hidden aria-label="Election-night ticker"></div>
 
   <div id="shell">
     <aside id="pane" class="pane" aria-label="Detail pane"></aside>

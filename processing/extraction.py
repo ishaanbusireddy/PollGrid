@@ -149,11 +149,20 @@ def process_raw_item(raw_item_id: int) -> int | None:
 def cluster_fact(fact_id: int) -> None:
     """Same-window story clustering: cosine against recent story centroids;
     above threshold joins the story, otherwise a new story is born. The feed
-    pushes story clusters, never raw articles."""
+    pushes story clusters, never raw articles.
+
+    Archival facts (raw_items.archival=1 — landed past the recency window) are
+    fully extracted, chained, searchable and citable, but they must NEVER
+    create or update a live story or broadcast a websocket frame: they land
+    silently (addendum §3)."""
     from core.config import cfg
     fact = db.query_one("SELECT * FROM extracted_facts WHERE id=?", (fact_id,))
     if fact is None:
         return
+    if fact["raw_item_id"] is not None:
+        raw = db.query_one("SELECT archival FROM raw_items WHERE id=?", (fact["raw_item_id"],))
+        if raw and raw["archival"]:
+            return  # archival: no story, no broadcast — lands silently
     vec = embed(fact["summary"])
     threshold = cfg("correlation.same_window_similarity_threshold")
     gap_hours = cfg("correlation.same_window_max_gap_hours")

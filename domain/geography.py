@@ -121,8 +121,29 @@ def _county_type(geoid: str, name: str) -> str:
     return "county"
 
 
+def flag_url(name: str, usps: str) -> str:
+    """Wikimedia Commons Special:FilePath — a stable URL from the flag file's
+    plain name, no API key, no CDN hash (the GlobeGrid portrait pattern)."""
+    special = {
+        "GA": "Flag_of_Georgia_(U.S._state).svg",
+        "DC": "Flag_of_the_District_of_Columbia.svg",
+        "VI": "Flag_of_the_United_States_Virgin_Islands.svg",
+        "MP": "Flag_of_the_Northern_Mariana_Islands.svg",
+    }
+    fname = special.get(usps, f"Flag_of_{name.replace(' ', '_')}.svg")
+    return f"https://commons.wikimedia.org/wiki/Special:FilePath/{fname}?width=320"
+
+
+def _ensure_flags() -> None:
+    with db.write() as conn:
+        for fips, (usps, name, _terr) in STATES.items():
+            conn.execute("UPDATE states SET flag_url=? WHERE fips_code=? AND flag_url IS NULL",
+                         (flag_url(name, usps), fips))
+
+
 def seed() -> None:
     if db.query_one("SELECT 1 FROM states LIMIT 1"):
+        _ensure_flags()  # additive on databases created before the column existed
         return  # idempotent: seed only an empty geography
 
     with db.write() as conn:
@@ -213,6 +234,20 @@ def seed() -> None:
         conn.execute("INSERT OR IGNORE INTO redistricting_events(state_fips,congress_number,effective_from,note) "
                      "VALUES('09', ?, '2022-06-01', 'CT county-equivalents replaced by planning regions (Census)')",
                      (CURRENT_CONGRESS,))
+
+    _ensure_flags()
+
+
+# Census regions (for regional pollster house effects, addendum §1.3)
+CENSUS_REGION: dict[str, str] = {}
+for _u in ("CT ME MA NH RI VT NJ NY PA".split()):
+    CENSUS_REGION[_u] = "northeast"
+for _u in ("IL IN MI OH WI IA KS MN MO NE ND SD".split()):
+    CENSUS_REGION[_u] = "midwest"
+for _u in ("DE FL GA MD NC SC VA WV DC AL KY MS TN AR LA OK TX".split()):
+    CENSUS_REGION[_u] = "south"
+for _u in ("AZ CO ID MT NV NM UT WY AK CA HI OR WA".split()):
+    CENSUS_REGION[_u] = "west"
 
 
 def phase_a_checks() -> dict:

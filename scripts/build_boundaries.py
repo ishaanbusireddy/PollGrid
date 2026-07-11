@@ -73,6 +73,25 @@ def _round_ring(ring: list) -> list:
     return out
 
 
+def _normalize_antimeridian(geom: dict, state_fips: str) -> dict:
+    """Alaska's Aleutians cross 180°; some islands sit at lon +179 (eastern
+    hemisphere). Drawn raw, the +179 and -179 points project to opposite sides
+    of the map and draw a line straight across it. Shift every eastern-
+    hemisphere point to negative-continuous (lon-360), matching the vendored
+    us_states.json convention (Alaska there runs ~-189..-130), so both layers
+    project identically and no cross-map line appears."""
+    if state_fips != "02":
+        return geom
+    def fix_ring(ring):
+        return [[lon - 360 if lon > 0 else lon, lat] for lon, lat in ring]
+    if geom["type"] == "Polygon":
+        return {"type": "Polygon", "coordinates": [fix_ring(r) for r in geom["coordinates"]]}
+    if geom["type"] == "MultiPolygon":
+        return {"type": "MultiPolygon",
+                "coordinates": [[fix_ring(r) for r in poly] for poly in geom["coordinates"]]}
+    return geom
+
+
 def simplify_geometry(geom: dict, tol: float) -> dict:
     def simp_ring(ring):
         out = douglas_peucker([tuple(p) for p in ring], tol)
@@ -112,10 +131,11 @@ def normalize_feature(feature: dict, tol: float) -> dict | None:
     district_number = int(cd)
     if not geoid:
         geoid = f"{state_fips}{district_number:02d}"
+    geom = _normalize_antimeridian(feature["geometry"], state_fips)
     return {"type": "Feature", "id": geoid,
             "properties": {"geoid": geoid, "state_fips": state_fips,
                            "district_number": district_number},
-            "geometry": simplify_geometry(feature["geometry"], tol)}
+            "geometry": simplify_geometry(geom, tol)}
 
 
 def main() -> None:

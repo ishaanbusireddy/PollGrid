@@ -9,6 +9,20 @@ import { makeAlbersUsa, eachPolygon, themePalette, rampColor } from './geometry.
 
 const REF_W = 960, REF_H = 600;
 const COUNTY_LOD_SCALE = 2.6;
+const K_MIN = 0.6, K_MAX = 12;
+
+/* game-style keyboard nav: WASD/arrows pan, Q/E and +/- zoom */
+const NAV_KEYS = new Set([
+  'w', 'a', 's', 'd', 'q', 'e',
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+  '+', '=', '-', '_',
+]);
+
+function isTypingTarget(t) {
+  if (!t) return false;
+  const tag = t.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+}
 
 export class Tier2Map {
   constructor(container, statesGeo, hooks = {}) {
@@ -27,8 +41,10 @@ export class Tier2Map {
     this.districtsVisible = false;
     this.showCounties = false;
 
-    this.view = { x: 0, y: 0, k: 1 };       // pan/zoom in reference coords
+    this.view = { x: REF_W / 2, y: REF_H / 2, k: 1 }; // pan/zoom in reference coords
     this.flight = null;
+    this._keys = new Set();                  // currently-held nav keys
+    this._navRaf = null;                     // rAF handle, live ONLY while a key is held
     this.threads = [];                       // 2D animated arcs
     this.choropleth = { tier: 'state', values: null, confidence: null, rampType: 'sequential', min: 0, max: 1 };
     this.override = null;
@@ -160,9 +176,26 @@ export class Tier2Map {
       this._drag = null;
       if (!moved) this.hooks.onPick && this.hooks.onPick(this.pick(e.clientX, e.clientY), e);
     };
+    // smooth wheel zoom, anchored to the cursor: the geographic point under the
+    // pointer stays under the pointer (≈0.18 per notch).
     this._onWheel = (e) => {
       e.preventDefault();
-      this.view.k = Math.max(0.8, Math.min(30, this.view.k * Math.exp(-e.deltaY * 0.0012)));
+      const rect = c.getBoundingClientRect();
+      const dpr = this.canvas.width / (rect.width || 1);
+      const sx = (e.clientX - rect.left) * dpr;
+      const sy = (e.clientY - rect.top) * dpr;
+      const w = this.canvas.width, h = this.canvas.height;
+      const base = Math.min(w / REF_W, h / REF_H);
+      const kOld = base * this.view.k;
+      const newViewK = Math.max(K_MIN, Math.min(K_MAX, this.view.k * Math.exp(-e.deltaY * 0.0018)));
+      const kNew = base * newViewK;
+      if (kNew !== kOld) {
+        // keep ref point under cursor fixed: cx' = cx + (s - center)*(1/kOld - 1/kNew)
+        this.view.x += (sx - w / 2) * (1 / kOld - 1 / kNew);
+        this.view.y += (sy - h / 2) * (1 / kOld - 1 / kNew);
+        this.view.k = newViewK;
+      }
+      this._clampView();
       this.flight = null;
     };
     this._onLeave = () => { this._hoverXY = null; this.hooks.onHover && this.hooks.onHover(null); };
@@ -171,8 +204,69 @@ export class Tier2Map {
     c.addEventListener('pointerup', this._onUp);
     c.addEventListener('wheel', this._onWheel, { passive: false });
     c.addEventListener('pointerleave', this._onLeave);
+    // keyboard nav is document-wide (the canvas isn't focusable); ignored while typing
+    this._onKeyDown = (e) => {
+      if (isTypingTarget(e.target)) return;
+      const k = e.key.toLowerCase();
+      if (!NAV_KEYS.has(k)) return;
+      e.preventDefault();
+      if (!this._keys.has(k)) { this._keys.add(k); this._startNav(); }
+    };
+    this._onKeyUp = (e) => {
+      const k = e.key.toLowerCase();
+      this._keys.delete(k);
+    };
+    this._onBlur = () => { this._keys.clear(); };
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+    window.addEventListener('blur', this._onBlur);
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
+  }
+
+  /** Light, generous pan clamp — the map moves freely with plenty of overscroll,
+      but the view centre can't wander so far that the country leaves the screen.
+      Also enforces the zoom range. */
+  _clampView() {
+    this.view.k = Math.max(K_MIN, Math.min(K_MAX, this.view.k));
+    const mx = REF_W * 0.75, my = REF_H * 0.75;
+    this.view.x = Math.max(-mx, Math.min(REF_W + mx, this.view.x));
+    this.view.y = Math.max(-my, Math.min(REF_H + my, this.view.y));
+  }
+
+  /* Key-gated rAF: starts on the first keydown, self-stops when every key is
+     released — never a permanent loop of its own. */
+  _startNav() {
+    if (this._navRaf != null) return;
+    this._navLast = performance.now();
+    this._navRaf = requestAnimationFrame((t) => this._navFrame(t));
+  }
+
+  _navFrame(now) {
+    if (!this._keys.size) { this._navRaf = null; return; }
+    const dt = Math.min(0.05, (now - (this._navLast || now)) / 1000); // seconds, clamped
+    this._navLast = now;
+    const w = this.canvas.width, h = this.canvas.height;
+    const scale = Math.min(w / REF_W, h / REF_H) * this.view.k; // device-px per ref-unit
+    const has = (k) => this._keys.has(k);
+    // pan: ~90%/sec of the visible span, so it feels the same at every zoom
+    let dx = 0, dy = 0;
+    if (has('a') || has('arrowleft')) dx -= 1;
+    if (has('d') || has('arrowright')) dx += 1;
+    if (has('w') || has('arrowup')) dy -= 1;
+    if (has('s') || has('arrowdown')) dy += 1;
+    if (dx || dy) {
+      this.view.x += dx * 0.9 * (w / scale) * dt;
+      this.view.y += dy * 0.9 * (h / scale) * dt;
+      this.flight = null;
+    }
+    // zoom toward the view centre
+    let zf = 0;
+    if (has('e') || has('+') || has('=')) zf += 1;
+    if (has('q') || has('-') || has('_')) zf -= 1;
+    if (zf) { this.view.k *= Math.exp(zf * 1.6 * dt); this.flight = null; }
+    this._clampView();
+    this._navRaf = requestAnimationFrame((t) => this._navFrame(t));
   }
 
   resize() {
@@ -253,7 +347,13 @@ export class Tier2Map {
       }
     };
 
-    if (this.showCounties && this.counties) {
+    if (this.choropleth.tier === 'district' && this.districts) {
+      // House mode: fill congressional districts, keep state outlines for context
+      drawLayer(this.districts, 'district', lineCss, 0.4);
+      ctx.strokeStyle = accentCss;
+      ctx.lineWidth = 1.2 / k;
+      for (const p of this.states.paths) ctx.stroke(p);
+    } else if (this.showCounties && this.counties) {
       drawLayer(this.counties, 'county', lineCss, 0.5);
       // state outlines on top
       ctx.strokeStyle = accentCss;
@@ -316,7 +416,11 @@ export class Tier2Map {
 
   destroy() {
     cancelAnimationFrame(this._raf);
+    if (this._navRaf != null) { cancelAnimationFrame(this._navRaf); this._navRaf = null; }
     window.removeEventListener('resize', this._onResize);
+    window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keyup', this._onKeyUp);
+    window.removeEventListener('blur', this._onBlur);
     const c = this.canvas;
     c.removeEventListener('pointerdown', this._onDown);
     c.removeEventListener('pointermove', this._onMove);

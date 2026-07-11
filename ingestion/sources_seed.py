@@ -53,11 +53,24 @@ SOURCES = [
     ("OpenElections (tier 2)", "results_openelections", "census", "https://raw.githubusercontent.com/openelections", "", 1, 1,
      {"states": OPENELECTIONS_DEFAULT_STATES, "cycles": OPENELECTIONS_DEFAULT_CYCLES}),
     ("AP Elections (tier 3, gated)", "results_ap", "results_native", "https://api.ap.org/v3", "AP_ELECTIONS_API_KEY", 1, 1, {}),
+    # PR-wire poll path (addendum §1.2): keyless site-restricted Google News
+    # queries over prnewswire/businesswire, budget 'targeted_search'; the
+    # adapter lives in ingestion/pollsters.py.
+    ("PR wire poll releases", "pr_wire_polls", "targeted_search",
+     "https://news.google.com/rss/search", "", 3, 1, {"outlet": "PR wire release"}),
 ] + [
     # Real pollster release feeds — one sources row per shop so each degrades
     # independently; the outlet name rides in config_json for ingest_poll().
     (f"{name} releases", "pollster_release", "polls", url, "", 1, 1, {"outlet": name})
-    for name, url in POLLSTER_FEEDS
+    for name, url, _prior in POLLSTER_FEEDS
+]
+
+# Mixed/global firehoses whose items must pass the deterministic US-relevance
+# gate in ingestion/store.py (addendum §4). Trusted US political desks keep
+# the default us_domestic=1 and are never gated.
+NON_US_DOMESTIC_SOURCES = [
+    "Google News US politics",                 # topic firehose — syndicates world coverage
+    "Targeted race search (Google News RSS)",  # open web search — same mixed pool
 ]
 
 OUTLETS = [
@@ -84,7 +97,11 @@ def seed() -> None:
         for name, url, tier, leaning in OUTLETS:
             conn.execute("INSERT OR IGNORE INTO media_outlets(name,url,reliability_tier,leaning) VALUES(?,?,?,?)",
                          (name, url, tier, leaning))
+        for name in NON_US_DOMESTIC_SOURCES:  # applies on fresh AND existing DBs
+            conn.execute("UPDATE sources SET us_domestic=0 WHERE name=?", (name,))
         _upgrade_existing(conn)
+    from ingestion.pollsters import seed_pollster_priors
+    seed_pollster_priors()
 
 
 def _upgrade_existing(conn) -> None:

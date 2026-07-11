@@ -447,7 +447,8 @@ CREATE TABLE IF NOT EXISTS pollster_ratings (
   as_of TEXT NOT NULL, avg_abs_error REAL, n_graded INTEGER NOT NULL DEFAULT 0,
   grade TEXT NOT NULL DEFAULT 'provisional', house_effect_dem REAL NOT NULL DEFAULT 0,
   weight_multiplier REAL NOT NULL DEFAULT 1.0,
-  UNIQUE (pollster_id, as_of)
+  region TEXT NOT NULL DEFAULT 'national',   -- 'national' or a Census region; regional rows
+  UNIQUE (pollster_id, as_of, region)        -- only written past a graded-count threshold
 );
 
 CREATE TABLE IF NOT EXISTS redistricting_fairness_scores (
@@ -513,6 +514,44 @@ CREATE TABLE IF NOT EXISTS race_calls (
 );
 
 -- ============ engagement ============
+-- ============ influence ledger (addendum §9/§10) ============
+CREATE TABLE IF NOT EXISTS lobbying_orgs (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+  sector TEXT NOT NULL DEFAULT 'uncategorized',
+  org_type TEXT NOT NULL DEFAULT 'pac' CHECK (org_type IN ('pac','super_pac','527','lobbying_firm','trade_assoc','advocacy')),
+  fec_committee_id TEXT, lda_registrant_id TEXT,
+  total_spend_ytd REAL, citation TEXT, synced_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS lobbying_disclosures (
+  id INTEGER PRIMARY KEY, org_id INTEGER NOT NULL REFERENCES lobbying_orgs(id),
+  period TEXT NOT NULL, client TEXT, issue_codes TEXT, amount REAL,
+  source TEXT NOT NULL, source_url TEXT,
+  UNIQUE (org_id, period, client, amount)
+);
+
+CREATE TABLE IF NOT EXISTS pac_candidate_spend (
+  id INTEGER PRIMARY KEY, org_id INTEGER NOT NULL REFERENCES lobbying_orgs(id),
+  candidate_id INTEGER REFERENCES candidates(id), race_id INTEGER REFERENCES races(id),
+  amount REAL NOT NULL, spend_type TEXT NOT NULL CHECK (spend_type IN
+    ('contribution','ie_support','ie_oppose')),
+  cycle_year INTEGER NOT NULL, as_of TEXT, source TEXT NOT NULL,
+  UNIQUE (org_id, candidate_id, spend_type, cycle_year, amount, as_of)
+);
+
+CREATE TABLE IF NOT EXISTS endorsements (
+  id INTEGER PRIMARY KEY, org_id INTEGER NOT NULL REFERENCES lobbying_orgs(id),
+  candidate_id INTEGER NOT NULL REFERENCES candidates(id), race_id INTEGER REFERENCES races(id),
+  as_of TEXT NOT NULL, source_url TEXT NOT NULL,   -- ONLY ever the org's own announcement
+  UNIQUE (org_id, candidate_id, race_id)
+);
+
+CREATE TABLE IF NOT EXISTS debate_schedule (
+  id INTEGER PRIMARY KEY, race_id INTEGER REFERENCES races(id),
+  title TEXT NOT NULL, scheduled_at TEXT NOT NULL, window_hours INTEGER NOT NULL DEFAULT 6,
+  transcript_hint_url TEXT
+);
+
 CREATE TABLE IF NOT EXISTS watchlist_items (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, added_at TEXT NOT NULL, UNIQUE(entity_type, entity_id));
 CREATE TABLE IF NOT EXISTS bookmarks (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS annotations (id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -555,6 +594,55 @@ def run_integrity_checks() -> dict[str, int]:
     return {name: len(query(sql)) for name, sql in INTEGRITY_CHECKS.items()}
 
 
+# Additive column migrations for databases created by earlier versions.
+# table -> {column: full ALTER type/default clause}
+_NEW_COLUMNS: dict[str, dict[str, str]] = {
+    "raw_items": {"archival": "INTEGER NOT NULL DEFAULT 0"},
+    "sources": {"us_domestic": "INTEGER NOT NULL DEFAULT 1"},
+    "states": {"flag_url": "TEXT"},
+    "candidates": {"portrait_url": "TEXT"},
+    "pollster_ratings": {"region": "TEXT NOT NULL DEFAULT 'national'"},
+}
+
+
+def _ensure_columns(conn) -> None:
+    for table, cols in _NEW_COLUMNS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for col, decl in cols.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+def _rebuild_pollster_ratings(conn) -> None:
+    """Databases created before regional ratings carry UNIQUE(pollster_id, as_of),
+    which would reject a same-day regional row even after the region column is
+    ALTERed in — so rebuild the table once with the three-column constraint."""
+    for idx in conn.execute("PRAGMA index_list(pollster_ratings)").fetchall():
+        if not idx[2]:  # not unique
+            continue
+        cols = [r[2] for r in conn.execute(f"PRAGMA index_info({idx[1]})").fetchall()]
+        if cols == ["pollster_id", "as_of"]:
+            break
+    else:
+        return
+    conn.execute("ALTER TABLE pollster_ratings RENAME TO pollster_ratings_pre_regional")
+    conn.execute("""CREATE TABLE pollster_ratings (
+  id INTEGER PRIMARY KEY, pollster_id INTEGER NOT NULL REFERENCES pollsters(id),
+  as_of TEXT NOT NULL, avg_abs_error REAL, n_graded INTEGER NOT NULL DEFAULT 0,
+  grade TEXT NOT NULL DEFAULT 'provisional', house_effect_dem REAL NOT NULL DEFAULT 0,
+  weight_multiplier REAL NOT NULL DEFAULT 1.0,
+  region TEXT NOT NULL DEFAULT 'national',
+  UNIQUE (pollster_id, as_of, region))""")
+    conn.execute(
+        "INSERT INTO pollster_ratings(id,pollster_id,as_of,avg_abs_error,n_graded,grade,"
+        "house_effect_dem,weight_multiplier,region) "
+        "SELECT id,pollster_id,as_of,avg_abs_error,n_graded,grade,house_effect_dem,"
+        "weight_multiplier,COALESCE(region,'national') FROM pollster_ratings_pre_regional")
+    conn.execute("DROP TABLE pollster_ratings_pre_regional")
+
+
 def migrate() -> None:
     with write() as conn:
         conn.executescript(SCHEMA)
+        _ensure_columns(conn)
+        _rebuild_pollster_ratings(conn)

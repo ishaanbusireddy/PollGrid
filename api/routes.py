@@ -20,11 +20,12 @@ def _as_of(req) -> str:
 
 @route("GET", "/api/status")
 def status(req):
+    from core.version import VERSION
     sources = db.query("SELECT id,name,source_type,health,last_run_at,last_error,is_active FROM sources")
     counts = {t: db.query_one(f"SELECT COUNT(*) c FROM {t}")["c"]
               for t in ("races", "polls", "candidates", "stories")}
     counts["facts"] = db.query_one("SELECT COUNT(*) c FROM extracted_facts")["c"]
-    return {"sources": sources, "counts": counts,
+    return {"version": VERSION, "sources": sources, "counts": counts,
             "election_night_mode": db.meta_get("election_night_mode") == "1"}
 
 
@@ -50,7 +51,7 @@ def diagnostics(req):
 @route("GET", "/api/geo/states")
 def geo_states(req):
     return db.query(
-        """SELECT s.fips_code, s.usps_code, s.name, s.is_territory,
+        """SELECT s.fips_code, s.usps_code, s.name, s.is_territory, s.flag_url,
                   a.electoral_votes, a.elector_method
            FROM states s LEFT JOIN electoral_vote_allocations a
              ON a.state_fips = s.fips_code AND a.cycle_to IS NULL ORDER BY s.name""")
@@ -186,6 +187,11 @@ def race_detail(req, id):
         "forecast": {"model": live, "dem_prob": f and f["dem_prob"], "rep_prob": f and f["rep_prob"],
                      "metric_id": f and f["metric_id"], "visible": vis, "gate_reason": reason},
         "narrative": narrative.cached(int(id)),
+        "backed_by": _backed_by([c["id"] for c in cands]) + db.query(
+            """SELECT o.id org_id, o.name org, o.sector, s.spend_type, SUM(s.amount) amount
+               FROM pac_candidate_spend s JOIN lobbying_orgs o ON o.id=s.org_id
+               WHERE s.race_id=? AND s.candidate_id IS NULL
+               GROUP BY o.id, s.spend_type""", (id,)),
         "corroboration": corroboration.check(int(id)),
         "volatility": vol_latest(f"race:{id}", as_of),
     }
@@ -318,7 +324,7 @@ def candidate_detail(req, id):
                        "ORDER BY as_of DESC LIMIT 20", (id,))
     return {"candidate": dict(c), "races": races_, "ideology": ideology_latest(int(id)),
             "finance": fin and {"total_receipts": fin["total_amount"], "as_of": fin["cycle_year"]},
-            "stances": stances}
+            "stances": stances, "backed_by": _backed_by([int(id)])}
 
 
 @route("GET", "/api/parties")
@@ -719,6 +725,82 @@ def _export_tables() -> set[str]:
     internal meta/chain-head store is excluded."""
     return {r["name"] for r in db.query(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} - {"app_meta"}
+
+
+# ------------------------------ influence ledger ------------------------------
+
+def _backed_by(candidate_ids: list[int]) -> list[dict]:
+    if not candidate_ids:
+        return []
+    ph = ",".join("?" * len(candidate_ids))
+    return db.query(
+        f"""SELECT o.id org_id, o.name org, o.sector, s.spend_type, SUM(s.amount) amount
+            FROM pac_candidate_spend s JOIN lobbying_orgs o ON o.id = s.org_id
+            WHERE s.candidate_id IN ({ph})
+            GROUP BY o.id, s.spend_type ORDER BY SUM(s.amount) DESC LIMIT 30""", candidate_ids)
+
+
+@route("GET", "/api/lobbies")
+def lobbies(req):
+    clauses, params = ["1=1"], []
+    if req.query.get("sector"):
+        clauses.append("o.sector=?"); params.append(req.query["sector"])
+    order = "total_spend DESC" if req.query.get("sort", "spend") == "spend" else "o.name"
+    rows = db.query(
+        f"""SELECT o.id, o.name, o.sector, o.org_type, o.citation,
+                   COALESCE((SELECT SUM(amount) FROM pac_candidate_spend WHERE org_id=o.id), 0)
+                   + COALESCE((SELECT SUM(amount) FROM lobbying_disclosures WHERE org_id=o.id), 0)
+                     AS total_spend,
+                   (SELECT COUNT(DISTINCT candidate_id) FROM pac_candidate_spend WHERE org_id=o.id)
+                     AS candidates_backed
+            FROM lobbying_orgs o WHERE {' AND '.join(clauses)}
+            ORDER BY {order} LIMIT 500""", params)
+    return rows
+
+
+@route("GET", "/api/lobbies/{id}")
+def lobby_detail(req, id):
+    org = db.query_one("SELECT * FROM lobbying_orgs WHERE id=?", (id,))
+    if org is None:
+        return 404, {"error": "organization not found"}
+    disclosures = db.query(
+        "SELECT period, client, issue_codes, amount, source, source_url FROM lobbying_disclosures "
+        "WHERE org_id=? ORDER BY period DESC LIMIT 200", (id,))
+    spend = db.query(
+        """SELECT s.candidate_id, c.name candidate, s.race_id, r.name race, s.amount,
+                  s.spend_type, s.cycle_year
+           FROM pac_candidate_spend s
+           LEFT JOIN candidates c ON c.id = s.candidate_id
+           LEFT JOIN races r ON r.id = s.race_id
+           WHERE s.org_id=? ORDER BY s.amount DESC LIMIT 200""", (id,))
+    endorsements = db.query(
+        """SELECT c.name candidate, r.name race, e.as_of, e.source_url
+           FROM endorsements e JOIN candidates c ON c.id = e.candidate_id
+           LEFT JOIN races r ON r.id = e.race_id WHERE e.org_id=? ORDER BY e.as_of DESC""", (id,))
+    return {"org": dict(org), "disclosures": disclosures, "spend": spend, "endorsements": endorsements}
+
+
+# ------------------------------ settings (API keys) ------------------------------
+
+@route("GET", "/api/settings/keys")
+def settings_keys(req):
+    from core import keys
+    from analyst.llm import current_provider
+    return {"keys": keys.status(), "env_path": keys.ENV_PATH, "llm": current_provider()}
+
+
+@route("POST", "/api/settings/keys")
+def settings_save(req):
+    from core import keys
+    body = req.json or {}
+    ok, detail = keys.save(body.get("name", ""), body.get("value", ""))
+    if ok:
+        # a working key wakes the matching source: clear its degraded state so
+        # the next scheduler tick runs it instead of sitting on a flat backoff
+        env_name = body.get("name", "")
+        db.execute("UPDATE sources SET health='ok', consecutive_failures=0, last_error=NULL "
+                   "WHERE api_key_env=?", (env_name,))
+    return (200 if ok else 400), {"ok": ok, "detail": detail, "configured": ok}
 
 
 @route("GET", "/api/export/{table}")

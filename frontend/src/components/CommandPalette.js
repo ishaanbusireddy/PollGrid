@@ -2,7 +2,43 @@
    or territory. States are matched client-side from the vendored boundary
    file, DC & the territories from the static list in the bag (they have no
    map geometry to click); races and candidates are queried live (/api/races,
-   /api/candidates?query=) and degrade silently when the backend is down. */
+   /api/candidates?query=) and degrade silently when the backend is down.
+
+   v3.0: frecency — pick counts + recency live in localStorage and break ties
+   between equally-good matches (match quality still ranks first); every
+   result carries a one-line preview (entity type + state). */
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+const FREC_KEY = 'pollgrid.palette.frecency';
+const FREC_HALF_LIFE_MS = 14 * 24 * 3600 * 1000; // two weeks
+
+function loadFrec() {
+  try { return JSON.parse(localStorage.getItem(FREC_KEY)) || {}; } catch (e) { return {}; }
+}
+
+function frecScore(entry) {
+  if (!entry) return 0;
+  const age = Math.max(0, Date.now() - (entry.t || 0));
+  return (entry.n || 0) * Math.pow(0.5, age / FREC_HALF_LIFE_MS);
+}
+
+function bumpFrec(hash) {
+  const f = loadFrec();
+  const e = f[hash] || { n: 0, t: 0 };
+  e.n = Math.min(999, e.n + 1);
+  e.t = Date.now();
+  f[hash] = e;
+  // prune: keep the 200 strongest entries so the store never grows unbounded
+  const keys = Object.keys(f);
+  if (keys.length > 200) {
+    keys.sort((a, b) => frecScore(f[b]) - frecScore(f[a]));
+    for (const k of keys.slice(200)) delete f[k];
+  }
+  try { localStorage.setItem(FREC_KEY, JSON.stringify(f)); } catch (e2) { /* noop */ }
+}
 
 function fuzzyScore(query, target) {
   // subsequence match, rewarding starts-with and word boundaries
@@ -68,16 +104,17 @@ export class CommandPalette {
   async _query(q) {
     const results = [];
     const seenFips = new Set();
+    const stateName = (fips) => this.bag.statesByFips?.[fips]?.name || null;
     for (const s of this.bag.states) {
       seenFips.add(s.key);
       const sc = fuzzyScore(q, s.name);
-      if (sc >= 0) results.push({ kind: 'state', label: s.name, score: sc, hash: `#/state/${s.key}` });
+      if (sc >= 0) results.push({ kind: 'state', label: s.name, preview: `state · FIPS ${s.key}`, score: sc, hash: `#/state/${s.key}` });
     }
     // DC & territories — indexed by full name AND USPS code (no geometry needed)
     for (const t of this.bag.territories || []) {
       if (seenFips.has(t.key)) continue; // already indexed from the boundary file
       const sc = Math.max(fuzzyScore(q, t.name), fuzzyScore(q, t.usps || ''));
-      if (sc >= 0) results.push({ kind: 'territory', label: t.name, score: sc, hash: `#/state/${t.key}` });
+      if (sc >= 0) results.push({ kind: 'territory', label: t.name, preview: `territory · ${t.usps}`, score: sc, hash: `#/state/${t.key}` });
     }
     const token = (this._token = Symbol());
     // remote sources, silently absent when the backend is down
@@ -89,13 +126,29 @@ export class CommandPalette {
       if (this._token !== token || !this.open) return;
       for (const r of races || []) {
         const sc = fuzzyScore(q, r.name || '');
-        if (sc >= 0) results.push({ kind: 'race', label: r.name, score: sc + 5, hash: `#/race/${r.id}` });
+        if (sc >= 0) {
+          const st = stateName(r.state_fips);
+          results.push({
+            kind: 'race', label: r.name, score: sc + 5, hash: `#/race/${r.id}`,
+            preview: `${r.race_type || 'race'}${r.cycle_year ? ' ' + r.cycle_year : ''}${st ? ' · ' + st : ''}`,
+          });
+        }
       }
       for (const c of cands || []) {
-        results.push({ kind: 'candidate', label: `${c.name} (${c.party_code || '—'})`, score: fuzzyScore(q, c.name) + 5, hash: `#/candidate/${c.id}` });
+        const st = stateName(c.state_fips);
+        results.push({
+          kind: 'candidate', label: `${c.name} (${c.party_code || '—'})`,
+          score: fuzzyScore(q, c.name) + 5, hash: `#/candidate/${c.id}`,
+          preview: `candidate${c.office ? ' · ' + c.office : ''}${st ? ' · ' + st : ''}`,
+        });
       }
     }
-    results.sort((a, b) => b.score - a.score);
+    // rank: match quality first (quantized so near-ties resolve by use),
+    // then frecency, then the raw score
+    const frec = loadFrec();
+    for (const r of results) r.frec = frecScore(frec[r.hash]);
+    results.sort((a, b) =>
+      (Math.round(b.score) - Math.round(a.score)) || (b.frec - a.frec) || (b.score - a.score));
     this.items = results.slice(0, 14);
     this.sel = 0;
     this._render();
@@ -115,7 +168,8 @@ export class CommandPalette {
     this.items.forEach((it, i) => {
       const el = document.createElement('div');
       el.className = 'palette-item' + (i === this.sel ? ' sel' : '');
-      el.innerHTML = `<span class="pi-kind">${it.kind}</span><span>${it.label}</span>`;
+      el.innerHTML = `<span class="pi-kind">${esc(it.kind)}</span>
+        <span class="pi-main"><span>${esc(it.label)}</span>${it.preview ? `<span class="pi-preview">${esc(it.preview)}</span>` : ''}</span>`;
       el.addEventListener('click', () => { this.sel = i; this._go(); });
       this.list.appendChild(el);
     });
@@ -131,6 +185,7 @@ export class CommandPalette {
   _go() {
     const it = this.items[this.sel];
     if (!it) return;
+    bumpFrec(it.hash);
     this.hide();
     this.bag.navigate(it.hash);
   }

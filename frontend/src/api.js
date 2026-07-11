@@ -103,8 +103,37 @@ export class Api {
   audit(metricId)      { return this.tryGet(`/api/audit/${metricId}`); }
   counterfactual(raceId, scenario) { return this.tryGet('/api/counterfactual', { race_id: raceId, scenario }); }
 
+  /* ----- influence ledger (v3.0) ----- */
+  lobbies(filters = {}) { return this.tryGet('/api/lobbies', filters); }
+  lobby(id)             { return this.tryGet(`/api/lobbies/${id}`); }
+
+  /* ----- open-data export (used for Brier trend sparklines) ----- */
+  exportTable(table, limit = 5000) {
+    return this.tryGet(`/api/export/${table}`, { format: 'json', limit });
+  }
+
   /* ----- analyst ----- */
   analystQuery(body) { return this.post('/api/analyst/query', body); }
+
+  /* ----- settings / managed API keys (stored in .env, never the DB) ----- */
+  settingsKeys() { return this.tryGet('/api/settings/keys'); }
+  /** POST returns {ok, detail, configured} on BOTH 200 and 400 — the 400 body
+      still carries the live-validation `detail`, so we read the JSON either way
+      instead of throwing it away like post() would. */
+  async settingsSaveKey(name, value) {
+    let res;
+    try {
+      res = await fetch(this._url('/api/settings/keys'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, value }),
+      });
+    } catch (e) {
+      return { ok: false, detail: 'backend unreachable — key was not saved', configured: false };
+    }
+    try { return await res.json(); }
+    catch (e) { return { ok: false, detail: `save failed (HTTP ${res.status})`, configured: false }; }
+  }
 
   /* ----- election night ----- */
   electionNightLive(raceId) { return this.tryGet('/api/electionnight/live', { race_id: raceId }); }

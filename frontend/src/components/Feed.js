@@ -105,6 +105,7 @@ export class Feed {
         ${story.category ? `<span class="chip ${chip}">${escapeHtml(story.category)}</span>` : ''}
         ${story.race_id ? `<span class="chip accent">race #${story.race_id}</span>` : ''}
         ${story.is_synthetic ? '<span class="chip warn synth-chip" title="synthetic demo row — remove with scripts/purge_synthetic.py">SYNTH</span>' : ''}
+        ${story.archival ? '<span class="chip" title="built from archival-source articles">archival</span>' : ''}
         ${story.score != null ? `<span class="story-score">score ${Number(story.score).toFixed(2)}</span>` : ''}
       </div>`;
     card.addEventListener('click', () => {

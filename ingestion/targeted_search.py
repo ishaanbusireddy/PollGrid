@@ -58,7 +58,8 @@ def run(source: dict) -> None:
             for item in items[:20]:
                 if item["id"]:
                     rid = land_raw_item(source["id"], item["id"], item["title"], item["link"],
-                                        item["body"], item["published"], matched_profile_id=profile["id"])
+                                        item["body"], item["published"], matched_profile_id=profile["id"],
+                                        source_row=source)
                     if rid:
                         total_hits += 1
                         db.execute("INSERT OR IGNORE INTO article_entity_links(raw_item_id,entity_type,entity_id) "

@@ -22,12 +22,14 @@ import { TimeScrubber } from './components/TimeScrubber.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { SoundEngine } from './components/SoundEngine.js';
 import { Scorecard } from './components/Scorecard.js';
+import { Lobbies } from './components/Lobbies.js';
 import { Diagnostics } from './components/Diagnostics.js';
+import { Settings } from './components/Settings.js';
 import { composeSnapshot, downloadCanvas } from './components/Snapshot.js';
 
 const THEME_KEY = 'pollgrid.theme';
 const RACE_TYPE_KEY = 'pollgrid.race_type';
-const RACE_TYPES = ['president', 'senate', 'governor', 'house'];
+const RACE_TYPES = ['president', 'senate', 'house', 'governor'];
 
 /* DC & the territories — no map geometry to click (except PR), so the HUD
    chip row and the command palette are their navigation affordance. */
@@ -58,6 +60,7 @@ const state = {
   statesGeo: null,
   countiesGeo: null,
   districtsAvailable: false,
+  districtActive: false,    // House race-type pins the district overlay + choropleth tier
 };
 
 const api = new Api(() => state.asOf);
@@ -65,7 +68,6 @@ let map = null;             // active tier renderer
 let countiesPromise = null;
 let fallbackTimer = null;
 let lastStorySince = '1970-01-01'; // first poll backfills existing clusters, then advances to the newest updated_at
-let lastStoryPoint = null;  // for correlation threads
 const stateCentroids = {};  // fips -> [lat, lon]
 
 /* ---------------- tiny utils ---------------- */
@@ -123,6 +125,7 @@ async function boot() {
   // mutable closure slots used by inner functions called during boot
   let lastLegend = null;   // last /api/map/values legend info
   let tip = null;          // hover tooltip element
+  let priorDistricts = null; // {visible, mapTier} saved when House pins districts
 
   /* ----- the callback bag (fixed closure DI) ----- */
   const bag = {
@@ -146,7 +149,8 @@ async function boot() {
       const f = state.countiesGeo?.features.find((x) => x.id === geoid);
       return f ? `${f.properties.NAME} ${f.properties.LSAD || ''}`.trim() : null;
     },
-    openAnalyst: (type, id, label) => { analyst.setEntity(type, id, label); navigate('#/analyst'); },
+    openAnalyst: (type, id, label) => { analyst.setEntity(type, id, label); analyst.openPanel(); },
+    setAnalystContext: (type, id, label) => analyst.setEntity(type, id, label),
     activateElectionNight: (raceId) => { electionNight.activate(raceId); ensureCounties(); },
     onCountyColors: (colors) => { if (map) map.setOverrideColors('county', colors); },
     playFanfare: () => sound.callFanfare(),
@@ -159,15 +163,17 @@ async function boot() {
   const feed = new Feed($('#feed'), bag);
   const pollsWindow = new PollsWindow($('#view-root'), bag);
   const scorecard = new Scorecard($('#view-root'), bag);
+  const lobbies = new Lobbies($('#view-root'), bag);
   const diagnostics = new Diagnostics($('#view-root'), bag);
-  const analyst = new Analyst($('#view-root'), bag);
+  const settings = new Settings($('#view-root'), bag);
+  const analyst = new Analyst(bag); // builds its own floating orb + docked panel
   const builder = new MapBuilder($('#pane'), bag);
   const electionNight = new ElectionNight($('#en-root'), bag);
   const scrubber = new TimeScrubber($('#scrubber'), bag);
   new CommandPalette($('#palette-root'), bag);
   $('#palette-hint').addEventListener('click', () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })));
 
-  window.pg = { state, pane, feed, pollsWindow, scorecard, diagnostics, analyst, builder, electionNight, scrubber, bag };
+  window.pg = { state, pane, feed, pollsWindow, scorecard, diagnostics, settings, analyst, builder, electionNight, scrubber, bag };
 
   /* ----- map ----- */
   buildMap();
@@ -182,12 +188,15 @@ async function boot() {
       toast('Backend unreachable — running on vendored data with empty-state panels', 6000);
       feed.setTransport('offline', false);
     }
+    // version in the header — live /api/status.version wins over the hardcoded fallback
+    if (s && s.version) $('#version-badge').textContent = 'v' + String(s.version).replace(/^v/i, '');
     if (s && s.election_night_mode) {
       const chip = $('#en-chip');
       chip.hidden = false;
       chip.style.cursor = 'pointer';
       chip.title = 'Election night mode is live — click to open';
       chip.addEventListener('click', () => bag.activateElectionNight(null));
+      startChyron();
     }
   });
   api.mapPins().then((p) => p && map && map.setPins(p));
@@ -238,14 +247,57 @@ async function boot() {
     }
   }
 
-  /** Correlation threads: arc between this story's geography and the linked
-      (or previous) story's geography — the second_order_link visual. */
+  /** Election-night chyron — a slim marquee strip under the top bar cycling
+      called/live races from /api/electionnight/live. Only ever started when
+      /api/status reports election_night_mode; hidden again if the feed dries
+      up. Duplicated track content makes the CSS loop seamless. */
+  let chyronTimer = null;
+  function startChyron() {
+    const chy = $('#chyron');
+    if (!chy || chyronTimer) return;
+    const refresh = async () => {
+      const data = await api.electionNightLive(null);
+      const races = (data && data.races) || [];
+      if (!races.length) { chy.hidden = true; return; }
+      const items = races.slice(0, 30).map((r) => {
+        const name = escapeHtml(r.name || `race #${r.race_id}`);
+        if (r.called) {
+          return `<span class="chy-item called" data-race="${r.race_id}">✓ ${name} — ${escapeHtml(r.called.winner_party || '?')} · called by ${escapeHtml(r.called.called_by || '?')}</span>`;
+        }
+        const tv = r.total_votes || {};
+        const ranked = Object.entries(tv).sort((a, b) => b[1] - a[1]);
+        const sum = ranked.reduce((a, [, v]) => a + (v || 0), 0);
+        const lead = ranked.length && sum
+          ? ` <span class="chy-lead">${escapeHtml(ranked[0][0])} ${((ranked[0][1] / sum) * 100).toFixed(0)}%</span>` : '';
+        const pcts = (r.counties || []).map((c) => c.pct_reporting).filter((p) => p != null);
+        const rep = pcts.length ? ` · ${(pcts.reduce((a, b) => a + b, 0) / pcts.length).toFixed(0)}% in` : '';
+        return `<span class="chy-item" data-race="${r.race_id}">${name} — live${lead}${rep}</span>`;
+      });
+      const run = items.join('<span class="chy-sep">•</span>') + '<span class="chy-sep">•</span>';
+      chy.innerHTML = `<div class="chy-track" style="--chy-dur:${Math.max(24, items.length * 7)}s">` +
+        `<span class="chy-label">ELECTION NIGHT</span>${run}<span class="chy-label">ELECTION NIGHT</span>${run}</div>`;
+      chy.hidden = false;
+    };
+    chy.addEventListener('click', (e) => {
+      const it = e.target.closest('[data-race]');
+      if (it && it.dataset.race && it.dataset.race !== 'null' && it.dataset.race !== 'undefined') {
+        navigate(`#/race/${it.dataset.race}`);
+      }
+    });
+    refresh();
+    chyronTimer = setInterval(refresh, 60000);
+  }
+
+  /** Correlation threads: an arc is drawn ONLY when the backend flags a real
+      link between two geographies (`linked_state_fips` on the story frame).
+      There is no previous-story fallback — unrelated consecutive stories must
+      never be joined by a stray cross-country line. No link → nothing drawn. */
   function threadForStory(p) {
     if (!map || !map.addThread) return;
-    const here = p.state_fips ? stateCentroids[String(p.state_fips).padStart(2, '0')] : null;
-    const linked = p.linked_state_fips ? stateCentroids[String(p.linked_state_fips).padStart(2, '0')] : lastStoryPoint;
+    if (!p.linked_state_fips || !p.state_fips) return;
+    const here = stateCentroids[String(p.state_fips).padStart(2, '0')];
+    const linked = stateCentroids[String(p.linked_state_fips).padStart(2, '0')];
     if (here && linked && (here[0] !== linked[0] || here[1] !== linked[1])) map.addThread(linked, here);
-    if (here) lastStoryPoint = here;
   }
 
   /* ----- router ----- */
@@ -288,6 +340,8 @@ async function boot() {
       onHover: (unit, x, y) => showHover(unit, x, y),
       onNeedCounties: () => ensureCounties(),
       onLodChange: (tierName) => {
+        // House mode pins the district tier — don't let the zoom LOD steal it
+        if (state.districtActive) return;
         state.mapTier = tierName;
         loadMapValues();
         updateTierBadge();
@@ -346,6 +400,44 @@ async function boot() {
       t.disabled = true;
       t.title = 'district overlay unavailable — run scripts/build_boundaries.py';
     }
+    // a House race-type chosen before the probe finished still gets its districts
+    if (state.raceType === 'house') applyRaceTypeDistricts();
+  }
+
+  function districtsToggleOn() {
+    const t = $('#districts-toggle');
+    return !!(t && t.classList.contains('primary'));
+  }
+
+  function setDistrictsOverlay(on) {
+    const t = $('#districts-toggle');
+    if (!t || t.disabled) return;
+    t.classList.toggle('primary', on);
+    if (map && map.setDistrictsVisible) map.setDistrictsVisible(on);
+  }
+
+  /** House is a per-district contest: entering 'house' auto-enables the district
+      overlay and pins the choropleth tier to 'district' (renderers fill it when
+      the mode supports the tier; harmless outline-only otherwise). Leaving
+      'house' restores whatever the user had. No-ops when district data is
+      missing, so the map never blanks. Idempotent. */
+  function applyRaceTypeDistricts() {
+    const t = $('#districts-toggle');
+    const house = state.raceType === 'house';
+    const available = state.districtsAvailable && !!t && !t.disabled;
+    if (house && available) {
+      if (!priorDistricts) priorDistricts = { visible: districtsToggleOn(), mapTier: state.mapTier };
+      state.districtActive = true;
+      setDistrictsOverlay(true);
+      state.mapTier = 'district';
+      updateTierBadge();
+    } else if (!house && priorDistricts) {
+      setDistrictsOverlay(priorDistricts.visible);
+      state.mapTier = priorDistricts.mapTier;
+      priorDistricts = null;
+      state.districtActive = false;
+      updateTierBadge();
+    }
   }
 
   /* ----- HUD ----- */
@@ -385,6 +477,7 @@ async function boot() {
         state.raceType = b.dataset.rt;
         try { localStorage.setItem(RACE_TYPE_KEY, state.raceType); } catch (e) { /* noop */ }
         for (const x of hud.querySelectorAll('#race-type-seg button')) x.classList.toggle('on', x === b);
+        applyRaceTypeDistricts();
         loadMapValues();
       });
     }
@@ -495,8 +588,9 @@ async function boot() {
     $('#map-hud').hidden = true; // full-page views cover the map; its HUD must not bleed through
     if (which === 'polls') pollsWindow.show();
     else if (which === 'scorecard') scorecard.show();
+    else if (which === 'lobbies') lobbies.show();
     else if (which === 'diagnostics') diagnostics.show();
-    else if (which === 'analyst') analyst.show();
+    else if (which === 'settings') settings.show();
   }
 
   function route() {
@@ -517,7 +611,12 @@ async function boot() {
     }
     const vr = $('#view-root');
 
-    if (page === 'polls' || page === 'scorecard' || page === 'analyst' || page === 'diagnostics') {
+    // '#/analyst' is now just an alias that opens the docked panel over whatever
+    // view is currently showing — it never takes over the page.
+    if (page === 'analyst') { analyst.openPanel(); return; }
+
+    if (page === 'polls' || page === 'scorecard' || page === 'lobbies' || page === 'settings' || page === 'diagnostics') {
+      bag.setAnalystContext('nation', 'US', 'the national picture');
       pane.close();
       showView(page);
       return;
@@ -532,23 +631,46 @@ async function boot() {
       return;
     }
 
-    if (page === 'race') { pane.open({ type: 'race', id: parts[1] }); return; }
+    // Each selection auto-updates the Analyst's context (SlidePane refines the
+    // label once its data loads; the entity_type+id stay stable so the chat is
+    // kept). The docked panel shows "context: {label}" and tracks these.
+    if (page === 'race') {
+      bag.setAnalystContext('race', parts[1], `race #${parts[1]}`);
+      pane.open({ type: 'race', id: parts[1] });
+      return;
+    }
     if (page === 'state') {
+      bag.setAnalystContext('state', parts[1], statesByFips[parts[1]]?.name || `state ${parts[1]}`);
       pane.open({ type: 'state', id: parts[1] });
       if (map) map.flyToFeature('state', parts[1]);
       return;
     }
     if (page === 'county') {
+      bag.setAnalystContext('county_equivalent', parts[1], bag.countyName(parts[1]) || `county ${parts[1]}`);
       pane.open({ type: 'county', id: parts[1] });
       bag.flyToCounty(parts[1]);
       return;
     }
-    if (page === 'district') { pane.open({ type: 'district', id: parts[1] }); return; }
-    if (page === 'candidate') { pane.open({ type: 'candidate', id: parts[1] }); return; }
-    if (page === 'party') { pane.open({ type: 'party', id: parts[1] }); return; }
+    if (page === 'district') {
+      bag.setAnalystContext('congressional_district', parts[1], `district ${parts[1]}`);
+      pane.open({ type: 'district', id: parts[1] });
+      return;
+    }
+    if (page === 'candidate') {
+      bag.setAnalystContext('candidate', parts[1], `candidate #${parts[1]}`);
+      pane.open({ type: 'candidate', id: parts[1] });
+      return;
+    }
+    if (page === 'party') {
+      bag.setAnalystContext('party', parts[1], `party #${parts[1]}`);
+      pane.open({ type: 'party', id: parts[1] });
+      return;
+    }
     if (page === 'story') { pane.open({ type: 'story', id: parts[1] }); return; }
+    if (page === 'lobby') { pane.open({ type: 'lobby', id: parts[1] }); return; }
 
-    // default: plain map
+    // default: plain map — nothing selected, so the Analyst reads the nation
+    bag.setAnalystContext('nation', 'US', 'the national picture');
     pane.close();
   }
 }

@@ -10,6 +10,7 @@ blind first-N cutoff."""
 from __future__ import annotations
 
 import json
+import threading
 
 from core import db
 from core.config import cfg
@@ -27,8 +28,44 @@ def invalidate_for_state(state_fips: str) -> None:
         invalidate("race", str(r["id"]))
 
 
+_rescore_lock = threading.Lock()
+_rescore_pending: set[int] = set()
+
+
+def _kick_factor_rescore(race_id: int) -> None:
+    """Event-driven scorecard refresh (addendum §7): new facts landing for a race
+    re-run its qualitative factor vector without waiting for the nightly job —
+    debounced through app_meta (min-gap, config) so an ingestion burst costs one
+    rescore, and run on a daemon thread so ingestion never blocks on an LLM."""
+    key = f"factor_rescore_at:{race_id}"
+    min_gap = cfg("genius_layer.event_rescore_min_gap_minutes")
+    last = db.meta_get(key)
+    if last:
+        row = db.query_one("SELECT (julianday(?) - julianday(?)) * 1440 AS mins", (now_iso(), last))
+        if row and row["mins"] is not None and row["mins"] < min_gap:
+            return
+    with _rescore_lock:
+        if race_id in _rescore_pending:
+            return  # a rescore for this race is already in flight
+        _rescore_pending.add(race_id)
+    db.meta_set(key, now_iso())
+
+    def _run():
+        try:
+            from modeling.factors_taxonomy import score_race
+            score_race(race_id)
+        except Exception as e:  # never let a rescore failure ripple into ingestion
+            print(f"event rescore failed for race {race_id}: {type(e).__name__}: {e}")
+        finally:
+            with _rescore_lock:
+                _rescore_pending.discard(race_id)
+
+    threading.Thread(target=_run, name=f"factor-rescore-{race_id}", daemon=True).start()
+
+
 def invalidate_for_race(race_id: int) -> None:
     invalidate("race", str(race_id))
+    _kick_factor_rescore(race_id)
 
 
 def _demographics_block(tier: str, entity_id: str) -> list[dict]:

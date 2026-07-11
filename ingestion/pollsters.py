@@ -29,23 +29,63 @@ from ingestion.http import SourceNotConfigured, get
 from ingestion.scheduler import register
 from ingestion.store import land_raw_item
 
-# The dozen-plus release feeds promised by the manual. Best-known URLs; each is
-# seeded as its OWN sources row (see ingestion/sources_seed.py), so a moved or
-# wrong feed degrades that single source and nothing else — that is the design.
-POLLSTER_FEEDS: list[tuple[str, str]] = [
-    ("Marist", "https://maristpoll.marist.edu/feed/"),
-    ("Monmouth", "https://www.monmouth.edu/polling-institute/feed/"),
-    ("Emerson College Polling", "https://emersoncollegepolling.com/feed/"),
-    ("Quinnipiac", "https://poll.qu.edu/rss"),
-    ("Pew Research Politics", "https://www.pewresearch.org/politics/feed/"),
-    ("AP-NORC", "https://apnorc.org/feed/"),
-    ("Gallup News", "https://news.gallup.com/rss/topic/all_gallup_headlines.aspx"),
-    ("Marquette Law Poll", "https://law.marquette.edu/poll/feed/"),
-    ("Siena College Research Institute", "https://scri.siena.edu/feed/"),
-    ("YouGov US politics", "https://today.yougov.com/rss/topics/politics"),
-    ("Data for Progress", "https://www.dataforprogress.org/blog?format=rss"),
-    ("Civiqs", "https://civiqs.com/blog/feed"),
+# The release feeds promised by the manual + addendum §1.1 breadth. Best-known
+# URLs; each is seeded as its OWN sources row (see ingestion/sources_seed.py),
+# so a moved or wrong feed degrades that single source and nothing else — that
+# is the design. Third field: a DECLARED house-effect prior in Dem lean points
+# (positive = shop's toplines historically run Dem-favorable), from documented
+# public reputations (538/RCP-style house-effect write-ups). The prior is
+# written to pollster_ratings with grade='prior' at seed time and is superseded
+# by any real grading row (newer as_of) the moment one exists.
+POLLSTER_FEEDS: list[tuple[str, str, float]] = [
+    ("Marist", "https://maristpoll.marist.edu/feed/", 0.0),
+    ("Monmouth", "https://www.monmouth.edu/polling-institute/feed/", 0.0),
+    ("Emerson College Polling", "https://emersoncollegepolling.com/feed/", 0.0),
+    ("Quinnipiac", "https://poll.qu.edu/rss", 0.0),
+    ("Pew Research Politics", "https://www.pewresearch.org/politics/feed/", 0.0),
+    ("AP-NORC", "https://apnorc.org/feed/", 0.0),
+    ("Gallup News", "https://news.gallup.com/rss/topic/all_gallup_headlines.aspx", 0.0),
+    ("Marquette Law Poll", "https://law.marquette.edu/poll/feed/", 0.0),
+    ("Siena College Research Institute", "https://scri.siena.edu/feed/", 0.0),
+    ("YouGov US politics", "https://today.yougov.com/rss/topics/politics", 0.0),
+    ("Data for Progress", "https://www.dataforprogress.org/blog?format=rss", 1.0),
+    ("Civiqs", "https://civiqs.com/blog/feed", 0.5),
+    # addendum §1.1 breadth — declared priors per documented public reputation
+    ("Public Policy Polling", "https://www.publicpolicypolling.com/feed/", 1.0),
+    ("Rasmussen Reports", "https://www.rasmussenreports.com/public_content/politics/rss", -1.5),
+    ("Morning Consult", "https://morningconsult.com/feed/", 0.0),
+    ("Ipsos US", "https://www.ipsos.com/en-us/rss.xml", 0.0),
+    ("Fox News Poll", "https://moxie.foxnews.com/google-publisher/politics.xml", 0.0),
+    ("Suffolk University Political Research Center", "https://www.suffolk.edu/news-features/feed", 0.0),
+    ("Trafalgar Group", "https://www.thetrafalgargroup.org/feed/", -1.5),
+    ("InsiderAdvantage", "https://insideradvantage.com/feed/", -1.0),
+    ("Cygnal", "https://www.cygn.al/feed/", -0.5),
+    ("co/efficient", "https://coefficient.org/feed/", -0.5),
+    ("Big Data Poll", "https://bigdatapoll.com/feed/", -1.0),
+    ("Echelon Insights", "https://echeloninsights.com/feed/", 0.0),
+    ("Beacon Research / Shaw & Company", "https://beaconresearch.com/feed/", 0.0),
+    ("Split Ticket", "https://split-ticket.org/feed/", 0.0),
+    ("Noble Predictive Insights", "https://noblepredictiveinsights.com/feed/", 0.0),
 ]
+
+# A prior's as_of is a fixed sentinel far in the past, so ANY real grading row
+# (modeling/pollster_ratings.refresh writes as_of=today) is newer and wins in
+# every latest-as_of lookup; INSERT OR IGNORE keeps re-seeding idempotent.
+PRIOR_AS_OF = "2000-01-01"
+
+
+def seed_pollster_priors() -> None:
+    """Write each feed's declared house-effect prior into pollster_ratings:
+    grade='prior', n_graded=0, weight_multiplier=1.0, region='national'."""
+    with db.write() as conn:
+        for name, url, prior in POLLSTER_FEEDS:
+            row = conn.execute("SELECT id FROM pollsters WHERE name=?", (name,)).fetchone()
+            pid = row["id"] if row else conn.execute(
+                "INSERT INTO pollsters(name,url) VALUES(?,?)", (name, url)).lastrowid
+            conn.execute(
+                "INSERT OR IGNORE INTO pollster_ratings(pollster_id,as_of,n_graded,grade,"
+                "house_effect_dem,weight_multiplier,region) VALUES(?,?,0,'prior',?,1.0,'national')",
+                (pid, PRIOR_AS_OF, prior))
 
 
 def ensure_pollster(name: str, url: str | None = None, methodology: str | None = None) -> int:
@@ -303,10 +343,59 @@ def run_releases(source: dict) -> None:
         if not item["id"]:
             continue
         rid = land_raw_item(source["id"], item["id"], item["title"], item["link"],
-                            item["body"], item["published"])
+                            item["body"], item["published"], source_row=source)
         if rid is None:
             continue  # dedup — already seen
         _maybe_ingest_toplines(source, outlet, rid, item)
+
+
+# --------------------------------------------------------------------------
+# PR-wire poll path (addendum §1.2). Registered here (not adapters.py) so the
+# whole path lives in one module. Per active competitive race, a keyless
+# site-restricted Google News RSS query over the two big US press-release
+# wires; hits land via the shared store path and then flow through the SAME
+# conservative topline parser as pollster releases — same never-fabricate
+# rules, same silent skip.
+# --------------------------------------------------------------------------
+
+_PR_WIRE_SITES = "(site:prnewswire.com OR site:businesswire.com)"
+
+
+def _competitive_races() -> list[dict]:
+    return db.query(
+        "SELECT id, name FROM races WHERE competitiveness IN ('tossup','lean') "
+        "AND status IN ('upcoming','live') ORDER BY CASE competitiveness "
+        "WHEN 'tossup' THEN 0 ELSE 1 END, id")
+
+
+@register("pr_wire_polls")
+def run_pr_wire(source: dict) -> None:
+    import urllib.parse
+
+    from ingestion import budget
+    from ingestion.http import FetchError
+    from ingestion.rss import parse_feed as _parse  # deferred: keeps the import graph flat
+
+    conf = json.loads(source["config_json"] or "{}")
+    outlet = conf.get("outlet") or source["name"]
+    for race in _competitive_races():
+        budget.spend("targeted_search")  # shared keyless Google News RSS budget
+        query = f'"{race["name"]}" poll {_PR_WIRE_SITES}'
+        url = f"{source['url']}?q={urllib.parse.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+        try:
+            items = _parse(get(url))
+        except FetchError as e:
+            if "429" in str(e) or "403" in str(e):
+                raise  # scheduler marks degraded; never retried in a tight loop
+            items = []
+        for item in items[:20]:
+            if not item["id"]:
+                continue
+            rid = land_raw_item(source["id"], item["id"], item["title"], item["link"],
+                                item["body"], item["published"], source_row=source)
+            if rid is None:
+                continue
+            _maybe_ingest_toplines(source, outlet, rid, item)
 
 
 @register("pollster_feed")

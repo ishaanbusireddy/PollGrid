@@ -33,6 +33,14 @@ ingestion:
     fec: 900
     congress_gov: 500
     targeted_search: 4000   # Google News RSS: budget-capped, competitiveness-rotated
+    lda: 300                # Senate LDA lobbying API
+  news_recency_hours: 48    # older landings are archival — extracted & citable, never "new"
+  debate_window:
+    poll_seconds: 120       # transcript polling cadence inside a scheduled debate window
+  social_x:
+    enabled: false          # paid X API tier — gated exactly like AP Elections
+    api_key_env: X_API_BEARER_TOKEN
+    handles: []             # tracked politician/campaign handles once enabled
 
 polling:
   averaging:
@@ -40,6 +48,9 @@ polling:
     house_effect_adjustment: true
     min_sample_size: 300
     weight_by_sample_size: true
+    herding_discount: true        # same-window multi-pollster bursts share information;
+    herding_window_days: 3        # their combined weight is discounted (addendum §1.3)
+  regional_ratings_min_graded: 10 # per-region house effects only past this graded count
 
 fundamentals:
   weights:                  # must sum to 1.0, validator checks it
@@ -82,6 +93,7 @@ genius_layer:
   l1_ratio: 0.5
   alpha: 0.1
   context_pack_token_budget: 30000
+  event_rescore_min_gap_minutes: 30   # debounce for the event-driven factor rescore
 
 llm_provider:
   primary: ollama_local
