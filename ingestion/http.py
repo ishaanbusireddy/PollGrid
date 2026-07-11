@@ -31,10 +31,24 @@ def get(url: str, params: dict | None = None, headers: dict | None = None, timeo
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except urllib.error.HTTPError as e:
-        raise FetchError(f"HTTP {e.code} for {url.split('?')[0]}") from e
+        # the response body often carries the actual reason (Census, FEC, etc.
+        # all return a plain-text error message on 4xx/5xx) — surface it
+        # instead of discarding it, or every downstream JSONDecodeError is a
+        # dead end with no way to tell what actually went wrong.
+        body = ""
+        try:
+            body = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        detail = f": {body}" if body.strip() else ""
+        raise FetchError(f"HTTP {e.code} for {url.split('?')[0]}{detail}") from e
     except Exception as e:
         raise FetchError(f"{type(e).__name__}: {e}") from e
 
 
 def get_json(url: str, params: dict | None = None, **kw):
-    return _json.loads(get(url, params, **kw).decode("utf-8", "replace"))
+    raw = get(url, params, **kw).decode("utf-8", "replace")
+    try:
+        return _json.loads(raw)
+    except _json.JSONDecodeError as e:
+        raise FetchError(f"non-JSON response from {url.split('?')[0]}: {raw[:300]!r}") from e
