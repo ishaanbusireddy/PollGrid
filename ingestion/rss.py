@@ -3,6 +3,7 @@ transcripts (same parser over per-campaign press-release feeds)."""
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
@@ -14,8 +15,25 @@ from ingestion.store import land_raw_item
 _ATOM = "{http://www.w3.org/2005/Atom}"
 
 
+def _repair_xml(raw: bytes) -> bytes:
+    """Real-world feeds routinely violate strict XML: a BOM or stray bytes
+    before the declaration, or a bare '&' that isn't part of an entity/charref
+    (the single most common feed-generator bug). Neither changes what a
+    well-formed feed would have parsed to — this only rescues feeds
+    xml.etree would otherwise refuse outright."""
+    text = raw.decode("utf-8", "replace").lstrip("﻿")
+    start = text.find("<")
+    if start > 0:
+        text = text[start:]
+    text = re.sub(r"&(?!#\d+;|#x[0-9a-fA-F]+;|[a-zA-Z][a-zA-Z0-9]*;)", "&amp;", text)
+    return text.encode("utf-8")
+
+
 def parse_feed(raw: bytes) -> list[dict]:
-    root = ET.fromstring(raw)
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        root = ET.fromstring(_repair_xml(raw))
     items = []
     for it in root.iter("item"):  # RSS 2.0
         items.append({

@@ -18,8 +18,16 @@ def _active_races() -> list[int]:
 
 def run() -> dict:
     from modeling import averaging, chamber_simulation, coalition, correlation, factors_taxonomy, \
-        forecasting, genius_ensemble, narrative, pollster_ratings, rhetoric, volatility
+        forecasting, fundamentals, genius_ensemble, narrative, pollster_ratings, rhetoric, volatility
     report: dict = {"started": now_iso()}
+    # classify competitiveness FIRST — everything below (active-race selection,
+    # PR-wire poll search, FEC's competitive rotation) keys off it, and it's the
+    # only signal available before a single real poll has landed
+    try:
+        report["competitiveness_classified"] = fundamentals.classify_all_competitiveness()
+    except Exception as e:
+        report["competitiveness_classified"] = f"ERROR {type(e).__name__}: {e}"
+        traceback.print_exc()
     active = _active_races()
     steps = [
         ("pollster_ratings", lambda: pollster_ratings.refresh()),

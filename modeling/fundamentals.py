@@ -95,6 +95,50 @@ def compute(race_id: int, as_of: str | None = None) -> dict | None:
             "components": components, "metric_id": metric_id}
 
 
+def classify_competitiveness(race_id: int) -> str | None:
+    """Bootstraps race.competitiveness from fundamentals alone — the only
+    signal that exists before any poll has landed. Without this, a real
+    (non-demo) install deadlocks: the PR-wire poll search, FEC's competitive-
+    candidate rotation, and the nightly genius-layer pass (factor scorecards,
+    ensemble, coalitions, narratives) all key off competitiveness IN
+    ('tossup','lean') OR real poll_averages — and poll_averages can't exist
+    until a poll lands. Honest about zero signal: generic_ballot and
+    economic_index are national constants (the same nonzero value for every
+    race in the country) and prove nothing about THIS race, so only the
+    race-specific components (incumbency, partisan_lean, fundraising_ratio)
+    count as real signal — if all three are exactly 0 (no history, no
+    incumbent, no fundraising), the race stays 'unrated' rather than every
+    uncontested seat in the country being fabricated as a 'tossup' off the
+    national mood alone. Safe to re-run — recomputed every nightly pass so
+    it improves as real data (fundraising, redistricting) arrives.
+    'incumbency' reads 0.0 for BOTH a genuine open seat and a race with no
+    candidate roster at all, so it can't disambiguate signal from absence by
+    itself — a roster existing at all (any race_candidates row) is checked
+    directly instead."""
+    f = compute(race_id)
+    if f is None:
+        return None
+    has_roster = db.query_one("SELECT 1 FROM race_candidates WHERE race_id=?", (race_id,)) is not None
+    if not (has_roster or f["components"]["partisan_lean"] or f["components"]["fundraising_ratio"]):
+        return None
+    bands = cfg("fundamentals.competitiveness_bands")
+    mag = abs(f["dem_score"])
+    band = ("tossup" if mag < bands["tossup_max"] else
+            "lean" if mag < bands["lean_max"] else
+            "likely" if mag < bands["likely_max"] else "safe")
+    db.execute("UPDATE races SET competitiveness=? WHERE id=?", (band, race_id))
+    return band
+
+
+def classify_all_competitiveness() -> int:
+    n = 0
+    for r in db.query(
+            "SELECT id FROM races WHERE status IN ('upcoming','live') AND race_type != 'generic_ballot'"):
+        if classify_competitiveness(r["id"]):
+            n += 1
+    return n
+
+
 def latest(race_id: int, as_of: str | None = None) -> dict | None:
     as_of = as_of or today()
     row = db.query_one("SELECT * FROM fundamentals_snapshots WHERE race_id=? AND as_of<=? "

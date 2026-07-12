@@ -19,9 +19,8 @@ SOURCES = [
     ("Census ACS", "census", "census", "https://api.census.gov/data", "CENSUS_API_KEY", 1, 1, {}),
     ("BLS economic indicators", "economics", "census", "https://api.bls.gov/publicAPI/v2",
      "BLS_API_KEY", 1, 1, {"series": "LNS14000000"}),
-    ("Census CVAP special tabulation", "cvap", "census", "", "", 1, 0,
-     {"url": DEFAULT_CVAP_URL,
-      "note": "CVAP is its own special-tabulation product (manual §05); flip active when wanted"}),
+    ("Census CVAP special tabulation", "cvap", "census", "", "", 1, 1,
+     {"url": DEFAULT_CVAP_URL, "note": "CVAP is its own special-tabulation product (manual §05)"}),
     ("OpenFEC", "fec", "fec", "https://api.open.fec.gov/v1", "FEC_API_KEY", 1, 1, {}),
     ("Congress.gov", "congress_gov", "congress_gov", "https://api.congress.gov/v3", "CONGRESS_GOV_API_KEY", 1, 1, {}),
     ("Politico", "rss", "news_rss", "https://rss.politico.com/politics-news.xml", "", 2, 1, {"outlet": "Politico"}),
@@ -46,8 +45,13 @@ SOURCES = [
     ("Campaign transcripts", "transcripts", "news_rss", "", "", 2, 1,
      {"note": "add per-campaign press-release feeds to config_json.feeds",
       "feeds": TRANSCRIPTS_DEFAULT_FEEDS}),
-    ("Pollster feeds", "pollster_feed", "polls", "", "", 1, 1,
-     {"note": "machine-readable pollster releases; config_json.feeds = [{pollster,url,format}]", "feeds": []}),
+    # Inactive by default: an opt-in extension point for a pollster's own
+    # machine-readable CSV feed, not part of the real pipeline (that's the
+    # per-shop "<Name> releases" rows below). Left permanently degraded would
+    # just be Status-page noise for something nobody configured.
+    ("Pollster feeds", "pollster_feed", "polls", "", "", 1, 0,
+     {"note": "machine-readable pollster releases; config_json.feeds = [{pollster,url,format}]; "
+              "flip is_active=1 once configured", "feeds": []}),
     ("State results (tier 1 native)", "results_native", "results_native", "", "", 1, 1,
      {"note": "per-state feeds via ingestion/results/tier1_native.py; file-drop dir data/results_native/"}),
     ("OpenElections (tier 2)", "results_openelections", "census", "https://raw.githubusercontent.com/openelections", "", 1, 1,
@@ -123,3 +127,9 @@ def _upgrade_existing(conn) -> None:
             config["cycles"] = config.get("cycles") or OPENELECTIONS_DEFAULT_CYCLES
             conn.execute("UPDATE sources SET is_active=1, config_json=? WHERE id=?",
                          (json.dumps(config), row["id"]))
+    row = conn.execute("SELECT id, config_json FROM sources WHERE source_type='pollster_feed'").fetchone()
+    if row:
+        config = json.loads(row["config_json"] or "{}")
+        if not config.get("feeds"):  # still unconfigured — quiet the permanent-degraded noise
+            conn.execute("UPDATE sources SET is_active=0 WHERE id=?", (row["id"],))
+    conn.execute("UPDATE sources SET is_active=1 WHERE source_type='cvap' AND is_active=0")

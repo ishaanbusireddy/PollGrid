@@ -59,6 +59,10 @@ fundamentals:
     economic_index: 0.20
     partisan_lean: 0.25
     fundraising_ratio: 0.10
+  competitiveness_bands:    # |dem_score| thresholds bootstrapping race.competitiveness
+    tossup_max: 0.05        # from fundamentals alone before polls exist (never invented —
+    lean_max: 0.15          # a race with zero real signal stays 'unrated', not 'tossup')
+    likely_max: 0.30
 
 correlation:
   same_window_similarity_threshold: 0.78

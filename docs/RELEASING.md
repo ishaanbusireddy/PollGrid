@@ -15,14 +15,27 @@ Nothing in it depends on what your local folder is called.
 
 ## Getting a new version onto your machine (Windows / PowerShell)
 
-Run these from anywhere. Only `$Proj` names your folder — change it once if
-you ever rename the folder, and every command still works.
+Run these from anywhere. Only `$Proj` and `$V` name things — change them
+once and every command still works. Everything happens on `main` — Claude's
+build sessions work on their own `claude/...` branch, which never gets
+pushed (Claude only has read access to your repo), so your GitHub only ever
+has `main`. Committing the zip's contents to `main` is what actually ships
+a version.
+
+The release zip is a flat SOURCE SNAPSHOT (built with `git archive`) — it has
+no `.git` folder by design, so it is never something you unzip in place of a
+clone. Always start from a real clone, then unzip the update on top of it.
 
 ```powershell
 $V    = "3.0"                                  # the version you downloaded
 $Proj = "$env:USERPROFILE\Downloads\PollGrid"  # your project folder, any name
 
-# 1. Unzip the flat archive straight into the project folder (overwrites code,
+# 1. First time ever (skip once $Proj\.git already exists):
+Remove-Item -Recurse -Force $Proj -ErrorAction SilentlyContinue
+git clone https://github.com/ishaanbusireddy/PollGrid.git $Proj
+cd $Proj
+
+# 2. Unzip the flat archive ON TOP of the clone (overwrites code, keeps .git,
 #    never touches data\ — your database and .env survive upgrades)
 Expand-Archive -Path "$env:USERPROFILE\Downloads\PollGridv$V.zip" -DestinationPath $Proj -Force
 ```
@@ -31,12 +44,6 @@ Expand-Archive -Path "$env:USERPROFILE\Downloads\PollGridv$V.zip" -DestinationPa
 
 ```powershell
 cd $Proj
-
-# First time only (skip if .git already exists):
-git init -b main
-git remote add origin https://github.com/ishaanbusireddy/PollGrid.git
-
-# Every release:
 git add -A
 git commit -m "PollGrid v$V"
 git push -u origin main

@@ -47,7 +47,10 @@ SCHEMA: dict = {
         "weights": {
             k: (float, 0.0, 1.0)
             for k in ("incumbency", "generic_ballot", "economic_index", "partisan_lean", "fundraising_ratio")
-        }
+        },
+        "competitiveness_bands": {
+            "tossup_max": (float, 0.0, 1.0), "lean_max": (float, 0.0, 1.0), "likely_max": (float, 0.0, 1.0),
+        },
     },
     "correlation": {
         "same_window_similarity_threshold": (float, 0.0, 1.0),
