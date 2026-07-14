@@ -103,9 +103,13 @@ llm_provider:
   primary: ollama_local
   fallback_order: [groq_free, anthropic, openrouter]
   ollama:
-    default_model: qwen3:30b-a3b-instruct
-    fallback_model: qwen3:14b
-    upgrade_model: llama3.3:70b
+    default_model: qwen3:30b-a3b   # MoE, ~3B active params — fast despite the 30B size;
+                                    # ~21GB VRAM once loaded, confirmed 100% GPU + ~4s
+                                    # per short call on a 24GB+ card (measured on a 5090)
+    fallback_model: qwen3:14b      # smaller escape hatch for weaker GPUs; also what a
+                                    # timed-out interactive call retries with
+    upgrade_model: llama3.3:70b    # opt-in, for anyone deliberately choosing max quality
+                                    # over speed on a card with the VRAM to spare
     host: http://localhost:11434
     interactive_timeout_seconds: 300  # a full context pack (~30k tokens) is a lot for a
                                        # local model to prefill+generate; 120s is too tight
