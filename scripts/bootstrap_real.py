@@ -128,24 +128,33 @@ def bootstrap_real(fec_pages: int = 40) -> None:
             _warn("targeted_search", e)
 
     _step("(i) deterministic nightly pipeline")
+    import statistics
+    from collections import deque
     from modeling import nightly
     import time as _time
 
-    _item_t0 = {}
+    _item_windows: dict = {}
 
     def _live(name, value, elapsed):
         v = len(value) if isinstance(value, list) else value
         print(f"  {name}: {v}  ({elapsed:.1f}s)", flush=True)
 
     def _live_item(step, done, total):
-        # this is what makes a long cold-start pass (factor_scorecards,
-        # candidate_stances) visibly alive instead of silent for hours —
-        # one line per race/candidate scored, with a running rate/ETA
-        t0 = _item_t0.setdefault(step, _time.monotonic())
-        elapsed = _time.monotonic() - t0
-        rate = elapsed / done if done else 0
-        eta = rate * (total - done)
-        print(f"    {step}: {done}/{total}  ({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)", flush=True)
+        # one line per race/candidate scored — what makes a long cold-start pass
+        # (factor_scorecards, candidate_stances) visibly alive instead of silent
+        # for hours. ETA uses the MEDIAN of the last 20 items' pace, not a mean —
+        # a single slow outlier (e.g. an LLM call that hit the background
+        # timeout ceiling) barely moves a median, whereas an average stays
+        # skewed until enough fast items dilute it back out of the window.
+        now = _time.monotonic()
+        win = _item_windows.setdefault(step, {"start": now, "last": now, "gaps": deque(maxlen=20)})
+        win["gaps"].append(now - win["last"])
+        win["last"] = now
+        elapsed = now - win["start"]
+        typical = statistics.median(win["gaps"])
+        eta = typical * (total - done)
+        print(f"    {step}: {done}/{total}  ({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining "
+              f"@ typical pace)", flush=True)
 
     report = nightly.run(progress=_live, item_progress=_live_item)
 
