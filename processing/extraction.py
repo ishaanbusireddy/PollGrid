@@ -25,7 +25,11 @@ except Exception:
 # doesn't trip anything here because matching is politics-tuned and bounded)
 CATEGORY_KEYWORDS: list[tuple[str, list[str]]] = [
     ("election_result", ["certified", "election results", "wins race", "concedes", "recount"]),
-    ("polling", ["poll", "survey", "approval rating", "favorability", "leads by"]),
+    # plural/gerund forms matter: "\bpoll\b" does NOT match "polls"/"polling"/"surveys"
+    # (the trailing s/ing breaks the word boundary), and those forms dominate real
+    # release/headline text — without them genuine poll releases misclassify
+    ("polling", ["poll", "polls", "polling", "pollster", "survey", "surveys",
+                 "approval rating", "favorability", "leads by", "point lead"]),
     ("finance", ["fundraising", "fec filing", "donation", "donor", "super pac", "campaign finance", "ad buy"]),
     ("legislation", ["bill", "vote on", "roll call", "amendment", "committee", "senate passed", "house passed"]),
     ("endorsement", ["endorse", "endorsement", "backs", "throws support"]),

@@ -85,6 +85,7 @@ SCHEMA: dict = {
             "fallback_model": (str, None, None),
             "upgrade_model": (str, None, None),
             "host": (str, None, None),
+            "interactive_timeout_seconds": (float, 5.0, 900.0),
         },
     },
     "analyst": {"queue_lanes": (int, 1, 4)},

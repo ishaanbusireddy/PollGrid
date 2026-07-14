@@ -662,14 +662,16 @@ export class MapBuilder {
   async _diffForecast() {
     const out = this.root.querySelector('.diff-out');
     out.innerHTML = '<span class="dim">comparing…</span>';
-    const fc = await this.bag.api.mapValues('forecast', 'state', { cycle: this.cycle, race_type: this.raceType });
+    // pick the tier the same way the paint path does — House units are districts,
+    // so a 'state' request would key by state_fips and never match a district unit
+    const tier = this.raceType === 'house' ? 'district' : 'state';
+    const fc = await this.bag.api.mapValues('forecast', tier, { cycle: this.cycle, race_type: this.raceType });
     if (!fc || !fc.values) {
       out.innerHTML = '<div class="empty">Live forecast unavailable to diff against.<span class="why">GET /api/map/values?mode=forecast failed</span></div>';
       return;
     }
     const disagreements = [];
     for (const u of this.units) {
-      if (u.isCd) continue;
       const mine = this.assign.get(u.key) ?? TOSSUP;
       const prob = fc.values[u.key];
       if (prob === undefined || mine === TOSSUP || mine === 7) continue;

@@ -124,6 +124,56 @@ def build(entity_type: str, entity_id: str) -> dict:
         pack["tagged_facts"] = relevance_rank(race["name"], [dict(f) for f in facts], fact_budget)
         if not pack["poll_average"]:
             pack["thin_coverage_notes"].append("no qualifying polls for this race yet")
+    elif entity_type == "candidate":
+        # candidate/party live in candidates/parties, NOT the tier-keyed demographics
+        # or political_history tables — the generic tier path below matches zero rows
+        # for them (CHECK constraints), so assemble their real sources explicitly.
+        cand = db.query_one("SELECT * FROM candidates WHERE id=?", (int(entity_id),))
+        if cand is None:
+            return pack
+        pack["candidate"] = dict(cand)
+        pack["party"] = db.query_one(
+            "SELECT code, name, platform_summary FROM parties WHERE code=?", (cand["party_code"],))
+        pack["races"] = db.query(
+            "SELECT r.id, r.name, r.race_type, r.cycle_year, r.state_fips, rc.is_incumbent, rc.party_code "
+            "FROM race_candidates rc JOIN races r ON r.id=rc.race_id WHERE rc.candidate_id=? "
+            "ORDER BY r.cycle_year DESC", (int(entity_id),))
+        pack["ideology"] = db.query_one(
+            "SELECT as_of, score, components_json, source FROM ideology_scores "
+            "WHERE candidate_id=? ORDER BY as_of DESC LIMIT 1", (int(entity_id),))
+        pack["finance"] = db.query(
+            "SELECT contributor_name, total_amount, n_contributions, cycle_year, source "
+            "FROM donors_aggregated WHERE candidate_id=? ORDER BY cycle_year DESC, total_amount DESC LIMIT 40",
+            (int(entity_id),))
+        pack["stances"] = db.query(
+            "SELECT topic, stance, method, as_of FROM topic_stance_scores WHERE candidate_id=? "
+            "ORDER BY as_of DESC LIMIT 40", (int(entity_id),))
+        facts = db.query(
+            "SELECT ef.id, ef.summary, ef.category, ef.created_at FROM extracted_facts ef "
+            "JOIN article_entity_links l ON l.raw_item_id=ef.raw_item_id "
+            "WHERE l.entity_type='candidate' AND l.entity_id=? ORDER BY ef.created_at DESC LIMIT 60",
+            (int(entity_id),))
+        pack["tagged_facts"] = [dict(f) for f in facts]
+        if not cand["bio"] and not pack["races"]:
+            pack["thin_coverage_notes"].append("no bio or race membership on file for this candidate yet")
+        if not pack["finance"]:
+            pack["thin_coverage_notes"].append("no campaign-finance rows for this candidate yet")
+    elif entity_type == "party":
+        party = db.query_one("SELECT * FROM parties WHERE id=? OR code=?", (entity_id, entity_id))
+        if party is None:
+            return pack
+        pack["party"] = dict(party)
+        pack["candidates"] = db.query(
+            "SELECT id, name, office, state_fips FROM candidates WHERE party_code=? "
+            "ORDER BY curated DESC, name LIMIT 60", (party["code"],))
+        facts = db.query(
+            "SELECT ef.id, ef.summary, ef.category, ef.created_at FROM extracted_facts ef "
+            "JOIN article_entity_links l ON l.raw_item_id=ef.raw_item_id "
+            "WHERE l.entity_type='party' AND l.entity_id=? ORDER BY ef.created_at DESC LIMIT 40",
+            (party["id"],))
+        pack["tagged_facts"] = [dict(f) for f in facts]
+        if not party["platform_summary"]:
+            pack["thin_coverage_notes"].append("no platform summary on file for this party yet")
     else:
         tier = entity_type
         pack["demographics"] = _demographics_block(tier, entity_id)

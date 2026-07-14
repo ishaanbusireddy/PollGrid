@@ -5,10 +5,14 @@ this for math. Every generative feature has a deterministic fallback the
 pipeline actually exercises when this module returns None.
 
 Concurrency: Ollama serves one generation at a time per loaded model, so the
-real design problem is queueing. Two-lane priority: interactive requests
-queue-jump background ones, and an in-flight background generation is canceled
-(connection dropped) when an interactive request arrives — queue-jump alone
-would still make a live user wait out a full background generation."""
+real design problem is queueing. Two-lane priority: a background generation
+yields the lane if an interactive request is already waiting, and an interactive
+request signals _bg_cancel so a background result is discarded rather than used.
+Note: with stream:False the background HTTP call can't be interrupted mid-flight
+(urlopen only returns once generation completes), so an interactive request can
+still wait out one in-progress background generation — the cancel prevents a
+stale result, it does not drop the socket. Streaming would be needed for true
+mid-generation preemption."""
 from __future__ import annotations
 
 import json as _json
@@ -88,16 +92,20 @@ def _complete_ollama(prompt: str, interactive: bool) -> str | None:
     else:
         _interactive_waiting.set()
         _bg_cancel.set()  # cancel any in-flight background generation
+    # a full context pack is a large prompt for a local model to prefill+generate
+    # against; the default 120s _post() timeout is tuned for short rubric/prose
+    # calls and is too tight for this — give interactive calls real headroom.
+    timeout = cfg("llm_provider.ollama.interactive_timeout_seconds") if interactive else 120.0
     try:
         with _ollama_lock:
             out = _post(cfg("llm_provider.ollama.host") + "/api/generate",
                         {"model": cfg("llm_provider.ollama.default_model"),
                          "prompt": prompt, "stream": False},
-                        {}, cancel=None if interactive else _bg_cancel)
+                        {}, timeout=timeout, cancel=None if interactive else _bg_cancel)
             if out is None and interactive:
                 out = _post(cfg("llm_provider.ollama.host") + "/api/generate",
                             {"model": cfg("llm_provider.ollama.fallback_model"),
-                             "prompt": prompt, "stream": False}, {})
+                             "prompt": prompt, "stream": False}, {}, timeout=timeout)
             return out.get("response") if out else None
     finally:
         if interactive:

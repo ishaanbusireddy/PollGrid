@@ -40,7 +40,12 @@ def _deterministic_answer(pack: dict, question: str) -> dict:
         lines.append(f"Note: {note}.")
     if not lines:
         lines.append("No data assembled for this entity yet — coverage is honestly thin.")
-    lines.append("(Deterministic answer: no LLM provider reachable; the numbers above are the "
+    from analyst.llm import provider_available
+    reason = ("no LLM provider reachable" if not provider_available() else
+              "the reachable provider didn't return a usable answer in time "
+              "(a full context pack is a lot for a local model to generate against — "
+              "try again, or increase llm_provider.ollama.interactive_timeout_seconds)")
+    lines.append(f"(Deterministic answer: {reason}; the numbers above are the "
                  "platform's own stored computations.)")
     return {"answer": " ".join(lines), "citations": cites, "model": "deterministic"}
 

@@ -12,8 +12,8 @@ const dollars = (v) => `$${Number(v) >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : Numbe
    race type — the HUD's race-type segmented control feeds their race_type=. */
 export const MODES = [
   { key: 'partisan_lean',  label: 'Partisan lean (PVI)',  tiers: ['state', 'county', 'district'], ramp: 'diverging',  fmt: margin, raceTyped: true },
-  { key: 'forecast',       label: 'Forecast (win prob.)', tiers: ['state', 'district'],           ramp: 'diverging',  fmt: pct,    raceTyped: true },
-  { key: 'average_margin', label: 'Polling average margin', tiers: ['state', 'district'],         ramp: 'diverging',  fmt: margin, raceTyped: true },
+  { key: 'forecast',       label: 'Forecast (win prob.)', tiers: ['state', 'county', 'district'], ramp: 'diverging',  fmt: pct,    raceTyped: true },
+  { key: 'average_margin', label: 'Polling average margin', tiers: ['state', 'county', 'district'], ramp: 'diverging',  fmt: margin, raceTyped: true },
   { key: 'turnout',        label: 'Turnout / early vote', tiers: ['state', 'county', 'district'], ramp: 'sequential', fmt: pct,    raceTyped: true },
   { key: 'fundraising',    label: 'Fundraising density',  tiers: ['state', 'district'],           ramp: 'sequential', fmt: dollars },
 ];

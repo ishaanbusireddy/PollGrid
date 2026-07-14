@@ -353,7 +353,9 @@ export class Tier2Map {
       ctx.strokeStyle = accentCss;
       ctx.lineWidth = 1.2 / k;
       for (const p of this.states.paths) ctx.stroke(p);
-    } else if (this.showCounties && this.counties) {
+    } else if (this.showCounties && this.counties && this.choropleth.tier === 'county') {
+      // only color the county layer when the choropleth is actually county-keyed;
+      // a state-keyed choropleth at county zoom keeps coloring the state layer below
       drawLayer(this.counties, 'county', lineCss, 0.5);
       // state outlines on top
       ctx.strokeStyle = accentCss;

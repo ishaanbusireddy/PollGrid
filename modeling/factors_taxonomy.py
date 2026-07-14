@@ -349,11 +349,19 @@ def score_race(race_id: int, as_of: str | None = None) -> list[dict]:
                 "SELECT * FROM qualitative_factor_scores WHERE race_id=? AND factor_key=? "
                 "ORDER BY as_of DESC, id DESC LIMIT 1", (race_id, key))
             newest_fact = facts[0]["id"] if facts else None
-            if cached and cached["method"] != "neutral_fallback" and newest_fact is not None:
-                cited = json.loads(cached["citation_fact_ids"] or "[]")
-                if cited and max(cited) >= newest_fact:
-                    out.append(dict(cached))
-                    continue  # cached: no new relevant facts since last scoring
+            # Cache validity keys on the newest fact that EXISTED at last scoring
+            # (scored_against_fact_id), not on the LLM's cherry-picked citation set —
+            # so an unchanged fact set is a real cache hit even when the model cited a
+            # subset. A prior good (non-neutral) row is reused whenever no newer fact
+            # has landed, which ALSO means a transient provider outage can't overwrite
+            # it with a neutral 0.
+            prior_ok = cached is not None and cached["method"] != "neutral_fallback"
+            fresh = prior_ok and (newest_fact is None or (
+                cached["scored_against_fact_id"] is not None
+                and newest_fact <= cached["scored_against_fact_id"]))
+            if fresh:
+                out.append(dict(cached))
+                continue
             if llm_ok and facts and complete_json:
                 res = complete_json(
                     f"Score ONE factor for a US election race against a fixed rubric.\n"
@@ -371,21 +379,32 @@ def score_race(race_id: int, as_of: str | None = None) -> list[dict]:
                     score, method, rationale, cites = 0.0, "neutral_fallback", "malformed LLM output", None
             else:
                 score, method, rationale, cites = 0.0, "neutral_fallback", "no LLM provider reachable", None
+            # A provider outage/malformed reply must not discard a still-valid prior
+            # score: carry the last non-neutral row forward rather than writing a 0.
+            if method == "neutral_fallback" and prior_ok:
+                out.append(dict(cached))
+                continue
+        scored_against = newest_fact if spec["method"] != "deterministic" else None
         row_id = db.execute(
             "INSERT INTO qualitative_factor_scores(race_id,factor_key,as_of,score,method,citation_fact_ids,"
-            "rationale) VALUES(?,?,?,?,?,?,?)",
-            (race_id, key, as_of, round(score, 4), method, cites, rationale))
+            "rationale,scored_against_fact_id) VALUES(?,?,?,?,?,?,?,?)",
+            (race_id, key, as_of, round(score, 4), method, cites, rationale, scored_against))
         out.append({"id": row_id, "race_id": race_id, "factor_key": key, "as_of": as_of,
                     "score": round(score, 4), "method": method, "citation_fact_ids": cites,
                     "rationale": rationale})
     return out
 
 
-def latest_vector(race_id: int) -> dict[str, float]:
+def latest_vector(race_id: int, as_of: str | None = None) -> dict[str, float]:
+    """Factor vector as of a date (default: newest). Passing as_of is what keeps
+    the ensemble refit honest — it reconstructs each graded prediction's features
+    from the snapshot that existed on the prediction's own as_of, never today's."""
     vec = {}
+    bound = "AND as_of <= ? " if as_of else ""
     for key in FACTORS:
+        params = (race_id, key, as_of) if as_of else (race_id, key)
         row = db.query_one(
             "SELECT score FROM qualitative_factor_scores WHERE race_id=? AND factor_key=? "
-            "ORDER BY as_of DESC, id DESC LIMIT 1", (race_id, key))
+            + bound + "ORDER BY as_of DESC, id DESC LIMIT 1", params)
         vec[key] = row["score"] if row else 0.0
     return vec

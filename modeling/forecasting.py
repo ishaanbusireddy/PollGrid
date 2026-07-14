@@ -95,6 +95,7 @@ def grade_predictions() -> int:
                     AND ph.office=r.race_type AND ph.cycle_year=r.cycle_year
                     AND ph.is_synthetic=0 AND ph.confidence='measured'
                WHERE p.graded_outcome IS NULL AND ph.winner_party IS NOT NULL
+                 AND r.race_type IN ('president','senate','governor')
                  AND p.as_of <= (r.cycle_year || '-11-30')"""):
         db.execute("UPDATE predictions SET graded_outcome=?, graded_at=datetime('now') WHERE id=?",
                    (r["winner_party"], r["id"]))

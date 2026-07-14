@@ -26,7 +26,8 @@ OFFICE_MAP = {"P": "president", "S": "senate", "H": "house"}
 CYCLES = [2026, 2028]
 AD_SPEND_PAGES_PER_RUN = 3   # schedule_e pages pulled after each completed roster pass
 COMMITTEE_PAGES_PER_RUN = 2  # /committees/ pages pulled after each completed roster pass
-SCHEDULE_CANDIDATES_PER_RUN = 5  # competitive-race candidates per schedule_a/b batch
+SCHEDULE_CANDIDATES_PER_RUN = 5  # competitive-race candidates per schedule_b batch
+FINANCE_CANDIDATES_PER_RUN = 20  # candidates per __totals__ batch, rotated across runs
 
 
 def _api_key(source: dict) -> str:
@@ -89,7 +90,6 @@ def run(source: dict) -> None:
         rebuild_search_profiles()  # new filers get hunted for from the instant they file
         _pull_finance_batch(base, key, cycle)
         _pull_committees(base, key, cycle)
-        _pull_top_donors(base, key, cycle)
         _pull_disbursements(base, key, cycle)
         _pull_ad_spend(base, key, cycle)
         try:  # new filings/finance invalidate the packs of every touched race
@@ -103,12 +103,19 @@ def run(source: dict) -> None:
 
 
 def _pull_finance_batch(base: str, key: str, cycle: int) -> None:
-    """Totals for candidates linked to competitive races — fundraising trend input."""
-    rows = db.query(
+    """__totals__ (receipts) for linked candidates — fundraising trend input.
+    Rotated across runs via fec_finance_cursor so the WHOLE roster eventually gets
+    totals, not just the same fixed top-20 by last_cycle every pass."""
+    all_rows = db.query(
         "SELECT DISTINCT c.id, c.fec_candidate_id FROM candidates c "
         "JOIN race_candidates rc ON rc.candidate_id=c.id "
         "WHERE c.fec_candidate_id IS NOT NULL AND c.synced_at IS NOT NULL "
-        "ORDER BY COALESCE(c.last_cycle,0) DESC LIMIT 20")
+        "ORDER BY COALESCE(c.last_cycle,0) DESC, c.id")
+    if not all_rows:
+        return
+    offset = int(db.meta_get("fec_finance_cursor", "0")) % len(all_rows)
+    db.meta_set("fec_finance_cursor", str((offset + FINANCE_CANDIDATES_PER_RUN) % len(all_rows)))
+    rows = (all_rows + all_rows)[offset:offset + min(FINANCE_CANDIDATES_PER_RUN, len(all_rows))]
     for r in rows:
         try:
             budget.spend("fec")
@@ -220,21 +227,6 @@ def _land_donor_aggregates(candidate_id: int, cycle: int, results: list[dict]) -
     return len(rows)
 
 
-def _pull_top_donors(base: str, key: str, cycle: int) -> None:
-    for r in _competitive_fec_candidates(SCHEDULE_CANDIDATES_PER_RUN):
-        try:
-            budget.spend("fec")
-        except BudgetExhausted:
-            return
-        try:
-            data = get_json(f"{base}/schedules/schedule_a/by_contributor/", {
-                "api_key": key, "candidate_id": r["fec_candidate_id"],
-                "cycle": cycle, "per_page": 50})
-        except Exception:
-            return  # schedule_a degrades independently
-        _land_donor_aggregates(r["id"], cycle, data.get("results") or [])
-
-
 def _insert_ad_spend(race_id: int, sponsor: str, medium: str, amount: float,
                      as_of: str, source: str) -> bool:
     """ad_spend has no unique constraint, so a pre-check guards the insert."""
@@ -277,19 +269,42 @@ def _land_schedule_b(candidate_id: int, fec_candidate_id: str, cycle: int,
             (candidate_id, "__disbursements__", total, n, cycle, f"openfec:schedule_b:{cycle}"))
 
 
+def _principal_committee(base: str, key: str, fec_candidate_id: str) -> str | None:
+    """Schedule B is committee-centric — disbursements are made BY committees, not
+    candidates — so resolve the candidate's principal campaign committee first.
+    A bare candidate_id filter is silently ignored by the endpoint and returns
+    cycle-wide disbursements that would be mis-attributed to one candidate."""
+    try:
+        data = get_json(f"{base}/candidate/{fec_candidate_id}/committees/",
+                        {"api_key": key, "designation": "P", "per_page": 1})
+    except Exception:
+        return None
+    for c in data.get("results") or []:
+        if c.get("committee_id"):
+            return c["committee_id"]
+    return None
+
+
 def _pull_disbursements(base: str, key: str, cycle: int) -> None:
     for r in _competitive_fec_candidates(SCHEDULE_CANDIDATES_PER_RUN):
         try:
             budget.spend("fec")
         except BudgetExhausted:
             return
+        committee_id = _principal_committee(base, key, r["fec_candidate_id"])
+        if not committee_id:
+            continue  # no resolvable committee — skip rather than mis-attribute
+        try:
+            budget.spend("fec")
+        except BudgetExhausted:
+            return
         try:
             data = get_json(f"{base}/schedules/schedule_b/", {
-                "api_key": key, "candidate_id": r["fec_candidate_id"],
+                "api_key": key, "committee_id": committee_id,
                 "two_year_transaction_period": cycle, "per_page": 100,
                 "sort": "-disbursement_date"})
         except Exception:
-            return  # schedule_b degrades independently
+            continue  # this candidate degrades independently; others still run
         _land_schedule_b(r["id"], r["fec_candidate_id"], cycle, data.get("results") or [])
 
 

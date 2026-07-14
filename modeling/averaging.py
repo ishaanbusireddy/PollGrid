@@ -12,20 +12,28 @@ from core.util import today
 from modeling.audit import record
 
 
+# Rating precedence: a genuinely graded row (n_graded>0) always wins; failing
+# that a declared prior (grade='prior', carrying a documented house effect) beats
+# the nightly grade='provisional' zero-row. Without this, refresh()'s provisional
+# row (as_of=today, house_effect=0) would shadow every declared prior (as_of=2000)
+# under a plain "ORDER BY as_of DESC", silently zeroing Rasmussen -1.5, DfP +1.0, etc.
+_RATING_ORDER = "ORDER BY (n_graded > 0) DESC, (grade != 'provisional') DESC, as_of DESC LIMIT 1"
+
+
 def _house_effects(pollster_id: int, region: str | None = None) -> tuple[float, float]:
-    """→ (dem_lean_pts, weight_multiplier) from the latest transparent rating.
+    """→ (dem_lean_pts, weight_multiplier) from the best available rating.
     A regional rating row (addendum §1.3 — written only past the graded-count
-    threshold) wins over the national one for races in that region; declared
-    priors (grade='prior') and provisional rows behave like any other rating."""
+    threshold) wins over the national one for races in that region; among rows
+    for one region, a graded row beats a declared prior beats a provisional zero."""
     if region:
         row = db.query_one(
             "SELECT house_effect_dem, weight_multiplier FROM pollster_ratings "
-            "WHERE pollster_id=? AND region=? ORDER BY as_of DESC LIMIT 1", (pollster_id, region))
+            "WHERE pollster_id=? AND region=? " + _RATING_ORDER, (pollster_id, region))
         if row is not None:
             return row["house_effect_dem"], row["weight_multiplier"]
     row = db.query_one(
         "SELECT house_effect_dem, weight_multiplier FROM pollster_ratings "
-        "WHERE pollster_id=? AND region='national' ORDER BY as_of DESC LIMIT 1", (pollster_id,))
+        "WHERE pollster_id=? AND region='national' " + _RATING_ORDER, (pollster_id,))
     if row is None:
         return 0.0, 1.0
     return row["house_effect_dem"], row["weight_multiplier"]

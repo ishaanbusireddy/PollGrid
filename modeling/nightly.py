@@ -40,6 +40,10 @@ def run() -> dict:
         # vector for active races, then produce ensemble forecasts wherever
         # fitted weights exist — the gate decides what is shown, never this step
         ("factor_scorecards", lambda: sum(1 for rid in active if factors_taxonomy.score_race(rid))),
+        # coalitions is a pure county-demographics-on-history regression (no polls) — drive it off
+        # the competitiveness `active` set like every other deterministic genius step, and run it
+        # BEFORE the ensemble so genius_ensemble's coalition_r2 feature is fresh the same night
+        ("coalitions", lambda: sum(1 for rid in active if coalition.compute(rid))),
         ("ensemble_forecasts", lambda: sum(1 for rid in active if genius_ensemble.predict(rid))),
         ("candidate_stances", lambda: sum(rhetoric.score_stances(c["id"]) for c in db.query(
             "SELECT DISTINCT rc.candidate_id id FROM race_candidates rc "
@@ -50,8 +54,6 @@ def run() -> dict:
         ("volatility_national", lambda: volatility.compute("national")["score"]),
         ("volatility_races", lambda: sum(1 for rid in active if volatility.compute(f"race:{rid}"))),
         ("second_order_links", correlation.find_second_order_links),
-        ("coalitions", lambda: sum(1 for r in db.query(
-            "SELECT DISTINCT race_id id FROM poll_averages") if coalition.compute(r["id"]))),
         ("chamber_senate", lambda: (chamber_simulation.run("senate") or {}).get("dem_control_prob")),
         ("chamber_house", lambda: (chamber_simulation.run("house") or {}).get("dem_control_prob")),
         ("chamber_ec", lambda: (chamber_simulation.run("ec") or {}).get("dem_control_prob")),

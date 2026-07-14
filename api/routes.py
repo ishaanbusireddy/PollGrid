@@ -266,17 +266,22 @@ def polls(req):
     total = db.query_one(f"SELECT COUNT(*) c FROM polls p JOIN races r ON r.id=p.race_id "
                          f"JOIN pollsters ps ON ps.id=p.pollster_id WHERE {where}", params)["c"]
     rows = db.query(
-        f"""SELECT p.*, ps.name pollster, r.name race_name FROM polls p
+        f"""SELECT p.*, ps.name pollster, r.name race_name, r.state_fips FROM polls p
             JOIN races r ON r.id=p.race_id JOIN pollsters ps ON ps.id=p.pollster_id
             WHERE {where} ORDER BY p.field_end DESC LIMIT ? OFFSET ?""", params + [limit, offset])
+    from modeling.averaging import _house_effects
+    from domain.geography import CENSUS_REGION, STATES
     out = []
     for p in rows:
         results = {r["party_code"]: r["pct"] for r in
                    db.query("SELECT party_code, pct FROM poll_results WHERE poll_id=?", (p["id"],))}
+        # region-aware house effect (same precedence as the average), and the national
+        # grade for display — never a stray regional row leaking onto an out-of-region poll
+        region = CENSUS_REGION.get(STATES[p["state_fips"]][0]) if p["state_fips"] in STATES else None
+        lean, _ = _house_effects(p["pollster_id"], region)
         grade_row = db.query_one(
-            "SELECT grade, house_effect_dem FROM pollster_ratings WHERE pollster_id=? "
+            "SELECT grade FROM pollster_ratings WHERE pollster_id=? AND region='national' "
             "ORDER BY as_of DESC LIMIT 1", (p["pollster_id"],))
-        lean = grade_row["house_effect_dem"] if grade_row else 0.0
         adjusted = {k: round(v - lean, 1) if k == "DEM" else (round(v + lean, 1) if k == "REP" else v)
                     for k, v in results.items()}
         out.append({"id": p["id"], "pollster": p["pollster"],
@@ -388,7 +393,9 @@ def pollster_ratings_all(req):
         """SELECT ps.id, ps.name, pr.grade, pr.avg_abs_error, pr.n_graded, pr.house_effect_dem,
                   pr.weight_multiplier
            FROM pollsters ps LEFT JOIN pollster_ratings pr ON pr.pollster_id=ps.id
-             AND pr.as_of=(SELECT MAX(as_of) FROM pollster_ratings WHERE pollster_id=ps.id)
+             AND pr.region='national'
+             AND pr.as_of=(SELECT MAX(as_of) FROM pollster_ratings
+                           WHERE pollster_id=ps.id AND region='national')
            ORDER BY ps.name""")
 
 
@@ -672,6 +679,20 @@ def map_values(req):
                                  "AND office=? ORDER BY cycle_year DESC LIMIT 1", (r["state_fips"], rt))
                 if h and h["turnout_pct"] is not None:
                     values[key] = h["turnout_pct"]
+        if tier == "county" and values:
+            # statewide race-typed values are keyed by 2-digit state_fips, but the
+            # county LOD draws 5-digit county geoids — fan each state's value onto all
+            # its counties so the county layer recolors instead of painting uniform no-data
+            by_state: dict[str, list[str]] = {}
+            for c in db.query("SELECT geoid, state_fips FROM county_equivalents"):
+                by_state.setdefault(c["state_fips"], []).append(c["geoid"])
+            fanned, fanned_conf = {}, {}
+            for sf, v in values.items():
+                for geoid in by_state.get(sf, []):
+                    fanned[geoid] = v
+                    if sf in confidence:
+                        fanned_conf[geoid] = confidence[sf]
+            values, confidence = fanned, fanned_conf
     elif mode == "volatility":
         for r in db.query("SELECT DISTINCT race_id FROM poll_averages"):
             race = db.query_one("SELECT state_fips FROM races WHERE id=?", (r["race_id"],))

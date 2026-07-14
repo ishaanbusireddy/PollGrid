@@ -33,7 +33,7 @@ def _features(race_id: int, as_of: str | None = None) -> list[float] | None:
     p = min(max(f["dem_prob"], 1e-4), 1 - 1e-4)
     feats = {"quant_prob_logit": math.log(p / (1 - p)),
              "coalition_r2": (coalition_latest(race_id) or {}).get("r2") or 0.0}
-    feats.update(latest_vector(race_id))
+    feats.update(latest_vector(race_id, as_of))  # as-of snapshot — no hindsight leak in refit
     return [feats[k] for k in FEATURE_ORDER]
 
 
@@ -106,10 +106,18 @@ def predict(race_id: int, as_of: str | None = None) -> dict | None:
     z = coefs["intercept"] + sum(coefs.get(k, 0.0) * v for k, v in zip(FEATURE_ORDER, feats))
     p = 1 / (1 + math.exp(-max(-30, min(30, z))))
     probs = {"DEM": round(p, 4), "REP": round(1 - p, 4)}
+    # every forecast writes a real computation_audit_log row (CLAUDE.md invariant);
+    # the audit link 404'd when this stored a literal "ensemble:<cat>" string instead
+    from modeling.audit import record
+    metric_id = record(
+        "forecast", f"race:{race_id}",
+        "ensemble elastic-net logistic: z = intercept + Σ coef_k*feature_k; p = 1/(1+exp(-z))",
+        {"as_of": as_of, "coefficients": coefs, "features": dict(zip(FEATURE_ORDER, feats))},
+        {"dem_prob": probs["DEM"]})
     with db.write() as conn:
         conn.execute("INSERT OR IGNORE INTO forecasts(race_id,as_of,model,dem_prob,rep_prob,other_prob,metric_id) "
                      "VALUES(?,?,?,?,?,?,?)", (race_id, as_of, "ensemble", probs["DEM"], probs["REP"], 0,
-                                               f"ensemble:{race['race_type']}"))
+                                               metric_id))
     provenance.chained_insert("predictions", {
         "race_id": race_id, "as_of": as_of, "model": "ensemble", "probs_json": json.dumps(probs)})
     return {"race_id": race_id, "as_of": as_of, "model": "ensemble", "dem_prob": probs["DEM"]}

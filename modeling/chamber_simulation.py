@@ -95,14 +95,17 @@ def run(chamber: str, as_of: str | None = None) -> dict | None:
         f"dem control at >= {need} seats (senate assumes {SENATE_NOT_UP_DEM()}D/{SENATE_NOT_UP_REP()}R "
         "not-up baseline and VP tiebreak to DEM)",
         {"n_races_modeled": len(probs)}, {"dem_control_prob": prob})
+    seat_distribution = {str(k): v / n_sims for k, v in sorted(dist.items())}
     db.execute("INSERT INTO chamber_simulations(chamber,as_of,n_sims,dem_control_prob,"
                "seat_distribution_json,metric_id) VALUES(?,?,?,?,?,?) "
                "ON CONFLICT(chamber,as_of) DO UPDATE SET n_sims=excluded.n_sims, "
                "dem_control_prob=excluded.dem_control_prob, "
                "seat_distribution_json=excluded.seat_distribution_json, metric_id=excluded.metric_id",
-               (chamber, as_of, n_sims, round(prob, 4),
-                json.dumps({str(k): v / n_sims for k, v in sorted(dist.items())}), metric_id))
-    return {"chamber": chamber, "as_of": as_of, "n_sims": n_sims, "dem_control_prob": round(prob, 4)}
+               (chamber, as_of, n_sims, round(prob, 4), json.dumps(seat_distribution), metric_id))
+    # seat_distribution + metric_id are contract-required (API_CONTRACT.md); latest()
+    # returns them, so on-demand run() must too or the histogram renders blank
+    return {"chamber": chamber, "as_of": as_of, "n_sims": n_sims, "dem_control_prob": round(prob, 4),
+            "seat_distribution": seat_distribution, "metric_id": metric_id}
 
 
 def latest(chamber: str, as_of: str | None = None) -> dict | None:

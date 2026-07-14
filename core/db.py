@@ -395,7 +395,8 @@ CREATE TABLE IF NOT EXISTS qualitative_factor_scores (
   id INTEGER PRIMARY KEY, race_id INTEGER NOT NULL REFERENCES races(id),
   factor_key TEXT NOT NULL, as_of TEXT NOT NULL, score REAL NOT NULL,
   method TEXT NOT NULL CHECK (method IN ('deterministic','llm_rubric','neutral_fallback')),
-  citation_fact_ids TEXT, rationale TEXT
+  citation_fact_ids TEXT, rationale TEXT,
+  scored_against_fact_id INTEGER   -- newest extracted_fact id present when scored; caches on it
 );
 
 CREATE TABLE IF NOT EXISTS ensemble_weights (
@@ -602,6 +603,7 @@ _NEW_COLUMNS: dict[str, dict[str, str]] = {
     "states": {"flag_url": "TEXT"},
     "candidates": {"portrait_url": "TEXT"},
     "pollster_ratings": {"region": "TEXT NOT NULL DEFAULT 'national'"},
+    "qualitative_factor_scores": {"scored_against_fact_id": "INTEGER"},
 }
 
 
