@@ -3,6 +3,7 @@ Runs on a daemon thread from api/server.py; callable directly for tests."""
 from __future__ import annotations
 
 import threading
+import time
 import traceback
 
 from core import db
@@ -16,18 +17,29 @@ def _active_races() -> list[int]:
         "OR competitiveness IN ('tossup','lean') OR status IN ('live','callable')")]
 
 
-def run() -> dict:
+def run(progress=None) -> dict:
+    """progress(step_name, value, elapsed_seconds), called after each step —
+    optional live feedback for a caller (e.g. bootstrap_real.py) since several
+    steps (factor_scorecards, candidate_stances) can each run for a long time
+    doing one local-LLM call per race/factor with nothing else printed."""
     from modeling import averaging, chamber_simulation, coalition, correlation, factors_taxonomy, \
         forecasting, fundamentals, genius_ensemble, narrative, pollster_ratings, rhetoric, volatility
     report: dict = {"started": now_iso()}
+
+    def _run_step(name, fn):
+        t0 = time.monotonic()
+        try:
+            report[name] = fn()
+        except Exception as e:
+            report[name] = f"ERROR {type(e).__name__}: {e}"
+            traceback.print_exc()
+        if progress:
+            progress(name, report[name], time.monotonic() - t0)
+
     # classify competitiveness FIRST — everything below (active-race selection,
     # PR-wire poll search, FEC's competitive rotation) keys off it, and it's the
     # only signal available before a single real poll has landed
-    try:
-        report["competitiveness_classified"] = fundamentals.classify_all_competitiveness()
-    except Exception as e:
-        report["competitiveness_classified"] = f"ERROR {type(e).__name__}: {e}"
-        traceback.print_exc()
+    _run_step("competitiveness_classified", fundamentals.classify_all_competitiveness)
     active = _active_races()
     steps = [
         ("pollster_ratings", lambda: pollster_ratings.refresh()),
@@ -64,11 +76,7 @@ def run() -> dict:
         ("integrity", db.run_integrity_checks),
     ]
     for name, fn in steps:
-        try:
-            report[name] = fn()
-        except Exception as e:
-            report[name] = f"ERROR {type(e).__name__}: {e}"
-            traceback.print_exc()
+        _run_step(name, fn)
     report["finished"] = now_iso()
     db.meta_set(f"nightly:{today()}", now_iso())
     return report

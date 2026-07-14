@@ -129,9 +129,12 @@ def bootstrap_real(fec_pages: int = 40) -> None:
 
     _step("(i) deterministic nightly pipeline")
     from modeling import nightly
-    report = nightly.run()
-    for k, v in report.items():
-        print(f"  {k}: {v if not isinstance(v, list) else len(v)}")
+
+    def _live(name, value, elapsed):
+        v = len(value) if isinstance(value, list) else value
+        print(f"  {name}: {v}  ({elapsed:.1f}s)", flush=True)
+
+    report = nightly.run(progress=_live)
 
     _step("(j) row counts")
     print_summary()
