@@ -17,11 +17,13 @@ def _active_races() -> list[int]:
         "OR competitiveness IN ('tossup','lean') OR status IN ('live','callable')")]
 
 
-def run(progress=None) -> dict:
+def run(progress=None, item_progress=None) -> dict:
     """progress(step_name, value, elapsed_seconds), called after each step —
-    optional live feedback for a caller (e.g. bootstrap_real.py) since several
-    steps (factor_scorecards, candidate_stances) can each run for a long time
-    doing one local-LLM call per race/factor with nothing else printed."""
+    optional live feedback for a caller (e.g. bootstrap_real.py). Several steps
+    (factor_scorecards, candidate_stances) can each run for a long time doing
+    one local-LLM call per race/factor/candidate — item_progress(step_name,
+    done, total) fires after EACH race/candidate within those specific steps,
+    so a long cold-start pass isn't just silence until the whole step ends."""
     from modeling import averaging, chamber_simulation, coalition, correlation, factors_taxonomy, \
         forecasting, fundamentals, genius_ensemble, narrative, pollster_ratings, rhetoric, volatility
     report: dict = {"started": now_iso()}
@@ -41,6 +43,27 @@ def run(progress=None) -> dict:
     # only signal available before a single real poll has landed
     _run_step("competitiveness_classified", fundamentals.classify_all_competitiveness)
     active = _active_races()
+
+    def _score_factor_scorecards():
+        n, done = len(active), 0
+        for rid in active:
+            if factors_taxonomy.score_race(rid):
+                done += 1
+            if item_progress:
+                item_progress("factor_scorecards", done, n)
+        return done
+
+    def _score_candidate_stances():
+        cand_ids = [c["id"] for c in db.query(
+            "SELECT DISTINCT rc.candidate_id id FROM race_candidates rc "
+            "WHERE rc.race_id IN (%s)" % (",".join(map(str, active)) or "NULL"))]
+        n, total = len(cand_ids), 0
+        for i, cid in enumerate(cand_ids, 1):
+            total += rhetoric.score_stances(cid)
+            if item_progress:
+                item_progress("candidate_stances", i, n)
+        return total
+
     steps = [
         ("pollster_ratings", lambda: pollster_ratings.refresh()),
         ("poll_averages", lambda: averaging.run_all()),
@@ -51,15 +74,13 @@ def run(progress=None) -> dict:
         # the genius layer's production loop (audit #14/#15): re-score the factor
         # vector for active races, then produce ensemble forecasts wherever
         # fitted weights exist — the gate decides what is shown, never this step
-        ("factor_scorecards", lambda: sum(1 for rid in active if factors_taxonomy.score_race(rid))),
+        ("factor_scorecards", _score_factor_scorecards),
         # coalitions is a pure county-demographics-on-history regression (no polls) — drive it off
         # the competitiveness `active` set like every other deterministic genius step, and run it
         # BEFORE the ensemble so genius_ensemble's coalition_r2 feature is fresh the same night
         ("coalitions", lambda: sum(1 for rid in active if coalition.compute(rid))),
         ("ensemble_forecasts", lambda: sum(1 for rid in active if genius_ensemble.predict(rid))),
-        ("candidate_stances", lambda: sum(rhetoric.score_stances(c["id"]) for c in db.query(
-            "SELECT DISTINCT rc.candidate_id id FROM race_candidates rc "
-            "WHERE rc.race_id IN (%s)" % (",".join(map(str, active)) or "NULL")))),
+        ("candidate_stances", _score_candidate_stances),
         ("race_narratives", lambda: sum(1 for rid in active if narrative.refresh_cache(rid))),
         ("grade_predictions", forecasting.grade_predictions),
         ("backtest", lambda: len(forecasting.backtest())),

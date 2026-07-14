@@ -129,12 +129,25 @@ def bootstrap_real(fec_pages: int = 40) -> None:
 
     _step("(i) deterministic nightly pipeline")
     from modeling import nightly
+    import time as _time
+
+    _item_t0 = {}
 
     def _live(name, value, elapsed):
         v = len(value) if isinstance(value, list) else value
         print(f"  {name}: {v}  ({elapsed:.1f}s)", flush=True)
 
-    report = nightly.run(progress=_live)
+    def _live_item(step, done, total):
+        # this is what makes a long cold-start pass (factor_scorecards,
+        # candidate_stances) visibly alive instead of silent for hours —
+        # one line per race/candidate scored, with a running rate/ETA
+        t0 = _item_t0.setdefault(step, _time.monotonic())
+        elapsed = _time.monotonic() - t0
+        rate = elapsed / done if done else 0
+        eta = rate * (total - done)
+        print(f"    {step}: {done}/{total}  ({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)", flush=True)
+
+    report = nightly.run(progress=_live, item_progress=_live_item)
 
     _step("(j) row counts")
     print_summary()
