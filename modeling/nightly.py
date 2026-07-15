@@ -64,6 +64,17 @@ def run(progress=None, item_progress=None) -> dict:
                 item_progress("candidate_stances", i, n)
         return total
 
+    def _refresh_race_narratives():
+        # narrative.generate() calls the LLM per race when the cache is stale
+        # (every race, on a first real pass) — same shape as factor_scorecards
+        n, done = len(active), 0
+        for i, rid in enumerate(active, 1):
+            if narrative.refresh_cache(rid):
+                done += 1
+            if item_progress:
+                item_progress("race_narratives", i, n)
+        return done
+
     steps = [
         ("pollster_ratings", lambda: pollster_ratings.refresh()),
         ("poll_averages", lambda: averaging.run_all()),
@@ -81,7 +92,7 @@ def run(progress=None, item_progress=None) -> dict:
         ("coalitions", lambda: sum(1 for rid in active if coalition.compute(rid))),
         ("ensemble_forecasts", lambda: sum(1 for rid in active if genius_ensemble.predict(rid))),
         ("candidate_stances", _score_candidate_stances),
-        ("race_narratives", lambda: sum(1 for rid in active if narrative.refresh_cache(rid))),
+        ("race_narratives", _refresh_race_narratives),
         ("grade_predictions", forecasting.grade_predictions),
         ("backtest", lambda: len(forecasting.backtest())),
         ("volatility_national", lambda: volatility.compute("national")["score"]),
