@@ -378,7 +378,11 @@ def score_race(race_id: int, as_of: str | None = None) -> list[dict]:
                 else:
                     score, method, rationale, cites = 0.0, "neutral_fallback", "malformed LLM output", None
             else:
-                score, method, rationale, cites = 0.0, "neutral_fallback", "no LLM provider reachable", None
+                # two distinct reasons land here — say which one honestly, since
+                # "no LLM provider reachable" was previously stamped even when the
+                # real reason was simply no qualifying facts to score against yet
+                reason = "no LLM provider reachable" if not llm_ok else "no recent cited facts to score against"
+                score, method, rationale, cites = 0.0, "neutral_fallback", reason, None
             # A provider outage/malformed reply must not discard a still-valid prior
             # score: carry the last non-neutral row forward rather than writing a 0.
             if method == "neutral_fallback" and prior_ok:

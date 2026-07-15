@@ -90,5 +90,85 @@ class TestFactorVectorAsOf(unittest.TestCase):
         self.assertEqual(latest_vector(rid)[key], 0.9)                 # newest by default
 
 
+class TestAnalystStaleSession(unittest.TestCase):
+    """A client-supplied session_id that no longer exists (e.g. after a DB
+    reset) must never crash the Analyst with a FOREIGN KEY IntegrityError."""
+
+    @classmethod
+    def setUpClass(cls):
+        db.migrate()
+        from domain import geography, entities, races
+        geography.seed(); entities.seed(); races.seed()
+
+    def test_nonexistent_session_id_falls_back_to_a_new_session(self):
+        from analyst.engine import query
+        race = db.query_one("SELECT id FROM races LIMIT 1")
+        result = query("race", str(race["id"]), "hello", session_id=999999999)
+        self.assertNotEqual(result["session_id"], 999999999)
+        row = db.query_one("SELECT 1 FROM analyst_sessions WHERE id=?", (result["session_id"],))
+        self.assertIsNotNone(row)
+
+
+class TestRssTolerantFallback(unittest.TestCase):
+    """Real-world feeds embed raw, non-CDATA HTML in description/content that
+    breaks strict XML parsing in ways the BOM/entity repair doesn't reach —
+    the tolerant per-item regex fallback must still extract clean items."""
+
+    def test_unclosed_tags_and_bare_entities_in_description(self):
+        from ingestion.rss import parse_feed
+        feed = (b'<?xml version="1.0"?><rss><channel>'
+                b'<item><title>T</title><link>http://x</link><guid>g1</guid>'
+                b'<description>Leads by 3.<br>Up next.&nbsp;More.</description>'
+                b'<pubDate>Mon</pubDate></item>'
+                b'</channel></rss>')
+        items = parse_feed(feed)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "T")
+        self.assertNotIn("<br>", items[0]["body"])
+        self.assertNotIn("&nbsp;", items[0]["body"])
+        self.assertIn("Leads by 3.", items[0]["body"])
+
+    def test_mismatched_tag_in_description_does_not_lose_the_item(self):
+        from ingestion.rss import parse_feed
+        feed = (b'<?xml version="1.0"?><rss><channel>'
+                b'<item><title>Recap</title><link>http://x</link><guid>g2</guid>'
+                b'<description>He said <b>this</b></div> and more.</description>'
+                b'<pubDate>Tue</pubDate></item>'
+                b'</channel></rss>')
+        items = parse_feed(feed)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "Recap")
+
+    def test_well_formed_feed_still_uses_the_fast_path(self):
+        from ingestion.rss import parse_feed
+        feed = (b'<?xml version="1.0"?><rss><channel><item>'
+                b'<title>Fine</title><link>http://x</link><guid>3</guid>'
+                b'<description><![CDATA[<p>ok</p>]]></description><pubDate>Wed</pubDate>'
+                b'</item></channel></rss>')
+        items = parse_feed(feed)
+        self.assertEqual(items[0]["title"], "Fine")
+
+
+class TestNeutralFallbackRationale(unittest.TestCase):
+    """The stored rationale must say which of the two distinct reasons
+    actually applies — 'no LLM provider reachable' is false when the
+    provider is fine and the race simply has no facts to score yet."""
+
+    @classmethod
+    def setUpClass(cls):
+        db.migrate()
+
+    def test_no_facts_reports_the_honest_reason_not_provider_down(self):
+        from unittest.mock import patch
+        from modeling.factors_taxonomy import score_race
+        rid = db.execute("INSERT INTO races(race_type,phase,cycle_year,seat,name) "
+                         "VALUES('senate','general',2026,'regular','No Facts Test')")
+        with patch("analyst.llm.provider_available", return_value=True):
+            rows = score_race(rid)
+        neutral = [r for r in rows if r["method"] == "neutral_fallback"]
+        self.assertTrue(neutral)
+        self.assertEqual(neutral[0]["rationale"], "no recent cited facts to score against")
+
+
 if __name__ == "__main__":
     unittest.main()

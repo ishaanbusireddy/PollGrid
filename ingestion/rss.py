@@ -2,6 +2,7 @@
 transcripts (same parser over per-campaign press-release feeds)."""
 from __future__ import annotations
 
+import html
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -29,11 +30,62 @@ def _repair_xml(raw: bytes) -> bytes:
     return text.encode("utf-8")
 
 
+_ITEM_BLOCK_RE = re.compile(r"<(item|entry)\b[^>]*>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
+_CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _text_field(block: str, *tag_names: str) -> str:
+    for tag in tag_names:
+        m = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}>", block, re.IGNORECASE | re.DOTALL)
+        if not m:
+            continue
+        val = m.group(1)
+        cdata = _CDATA_RE.search(val)
+        if cdata:
+            val = cdata.group(1)
+        val = html.unescape(_TAG_RE.sub(" ", val))
+        return re.sub(r"\s+", " ", val).strip()
+    return ""
+
+
+def _href_field(block: str, tag: str) -> str:
+    m = re.search(rf"<{tag}\b[^>]*\bhref=[\"']([^\"']+)[\"']", block, re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _parse_feed_tolerant(raw: bytes) -> list[dict]:
+    """Last-resort fallback when strict XML parsing fails even after the BOM/
+    entity repair above. The single most common real-world cause is raw,
+    non-CDATA-wrapped HTML inside <description>/<content> (unclosed <br>,
+    bare &nbsp;, self-closing tags without a slash) — content that a strict
+    parser rejects but that a human reader would call a perfectly normal RSS
+    item. Rather than build a DOM (which one bad field anywhere kills), this
+    extracts each <item>/<entry> block with a tolerant regex and pulls fields
+    out of the raw text — a single malformed field can't break the others."""
+    text = raw.decode("utf-8", "replace")
+    items = []
+    for m in _ITEM_BLOCK_RE.finditer(text):
+        block = m.group(2)
+        link = _text_field(block, "link") or _href_field(block, "link")
+        items.append({
+            "id": _text_field(block, "guid", "id") or link or _text_field(block, "title"),
+            "title": _text_field(block, "title"),
+            "link": link,
+            "body": _text_field(block, "description", "summary", "content:encoded", "content"),
+            "published": _text_field(block, "pubDate", "updated", "published"),
+        })
+    return items
+
+
 def parse_feed(raw: bytes) -> list[dict]:
     try:
         root = ET.fromstring(raw)
     except ET.ParseError:
-        root = ET.fromstring(_repair_xml(raw))
+        try:
+            root = ET.fromstring(_repair_xml(raw))
+        except ET.ParseError:
+            return _parse_feed_tolerant(raw)
     items = []
     for it in root.iter("item"):  # RSS 2.0
         items.append({

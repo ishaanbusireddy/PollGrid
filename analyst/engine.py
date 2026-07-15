@@ -60,6 +60,13 @@ def _extract_citations(text: str) -> list[dict]:
 
 def query(entity_type: str, entity_id: str, question: str, session_id: int | None = None) -> dict:
     pack, was_stale = get_pack(entity_type, entity_id)
+    # never trust a client-supplied session_id blindly — a browser tab can hold
+    # one from before a database reset/reseed, and inserting a message against
+    # a session row that no longer exists is a FOREIGN KEY crash, not a 500 the
+    # user caused. Verify it first; silently start a fresh session if it's gone.
+    if session_id is not None and db.query_one(
+            "SELECT 1 FROM analyst_sessions WHERE id=?", (session_id,)) is None:
+        session_id = None
     if session_id is None:
         session_id = db.execute("INSERT INTO analyst_sessions(started_at,entity_type,entity_id) VALUES(?,?,?)",
                                 (now_iso(), entity_type, str(entity_id)))
