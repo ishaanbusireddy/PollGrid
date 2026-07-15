@@ -24,8 +24,9 @@ def run(progress=None, item_progress=None) -> dict:
     one local-LLM call per race/factor/candidate — item_progress(step_name,
     done, total) fires after EACH race/candidate within those specific steps,
     so a long cold-start pass isn't just silence until the whole step ends."""
-    from modeling import averaging, chamber_simulation, coalition, correlation, factors_taxonomy, \
-        forecasting, fundamentals, genius_ensemble, narrative, pollster_ratings, rhetoric, volatility
+    from modeling import averaging, chamber_simulation, coalition, correlation, district_history, \
+        factors_taxonomy, forecasting, fundamentals, genius_ensemble, narrative, pollster_ratings, \
+        rhetoric, volatility
     report: dict = {"started": now_iso()}
 
     def _run_step(name, fn):
@@ -41,6 +42,10 @@ def run(progress=None, item_progress=None) -> dict:
     # classify competitiveness FIRST — everything below (active-race selection,
     # PR-wire poll search, FEC's competitive rotation) keys off it, and it's the
     # only signal available before a single real poll has landed
+    # derive current-line district presidential leans from real county history
+    # FIRST, so House races have a real (derived) partisan_lean when competitiveness
+    # classification and fundamentals read it this same run
+    _run_step("district_history_derived", district_history.derive_all)
     _run_step("competitiveness_classified", fundamentals.classify_all_competitiveness)
     active = _active_races()
 

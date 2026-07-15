@@ -69,6 +69,7 @@ SCHEMA: dict = {
     "election_night_calling": {"callable_margin_factor": (float, 0.5, 5.0)},
     "chamber_simulation": {"n_sims": (int, 100, 2000000), "national_shock_sd": (float, 0.0, 0.5),
                            "senate_not_up_dem": (int, 0, 100), "senate_not_up_rep": (int, 0, 100)},
+    "modeling": {"district_interpolation": {"grid_n": (int, 4, 128)}},
     "genius_layer": {
         "ensemble_method": (str, None, None),
         "refit_interval_days": (int, 1, 365),

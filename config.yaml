@@ -91,6 +91,11 @@ chamber_simulation:
   senate_not_up_dem: 24     # seats not up in the modeled cycle (update per cycle)
   senate_not_up_rep: 43
 
+modeling:
+  district_interpolation:
+    grid_n: 24              # n×n sample grid per county for areal-share estimation;
+                            # higher = finer district-split resolution, slower backfill
+
 genius_layer:
   ensemble_method: elastic_net_logistic
   refit_interval_days: 1

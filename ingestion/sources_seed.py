@@ -8,9 +8,18 @@ from core import db
 from ingestion.cvap import DEFAULT_CVAP_URL
 from ingestion.pollsters import POLLSTER_FEEDS
 
-# OpenElections deep-archive defaults: battleground-heavy state list, recent cycles.
-OPENELECTIONS_DEFAULT_STATES = ["GA", "PA", "MI", "WI", "AZ", "NV", "NC", "ME"]
-OPENELECTIONS_DEFAULT_CYCLES = [2018, 2020, 2022, 2024]
+# OpenElections deep-archive defaults: ALL 50 states + DC. Coverage is genuinely
+# uneven upstream (some state/cycle files 404, others are precinct-only) — the
+# tier-2 sync warns-and-continues per state/cycle, so a missing file costs nothing
+# and every state that DOES publish gets imported. Battlegrounds lead the list so
+# the highest-value states land first under a budget cap.
+OPENELECTIONS_DEFAULT_STATES = [
+    "GA", "PA", "MI", "WI", "AZ", "NV", "NC", "ME",            # battlegrounds first
+    "AL", "AK", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "HI", "ID", "IL", "IN",
+    "IA", "KS", "KY", "LA", "MD", "MA", "MN", "MS", "MO", "MT", "NE", "NH", "NJ",
+    "NM", "NY", "ND", "OH", "OK", "OR", "RI", "SC", "SD", "TN", "TX", "UT", "VT",
+    "VA", "WA", "WV", "WY"]
+OPENELECTIONS_DEFAULT_CYCLES = [2016, 2018, 2020, 2022, 2024]
 
 TRANSCRIPTS_DEFAULT_FEEDS = ["https://www.whitehouse.gov/briefing-room/feed/"]
 
@@ -122,9 +131,12 @@ def _upgrade_existing(conn) -> None:
     row = conn.execute("SELECT id, config_json FROM sources WHERE source_type='results_openelections'").fetchone()
     if row:
         config = json.loads(row["config_json"] or "{}")
-        if not config.get("states"):
+        _OLD_DEFAULT_STATES = ["GA", "PA", "MI", "WI", "AZ", "NV", "NC", "ME"]
+        # widen an existing DB from the old 8-battleground default to all 50+DC,
+        # but never touch a list someone deliberately customized to something else
+        if not config.get("states") or config.get("states") == _OLD_DEFAULT_STATES:
             config["states"] = OPENELECTIONS_DEFAULT_STATES
-            config["cycles"] = config.get("cycles") or OPENELECTIONS_DEFAULT_CYCLES
+            config["cycles"] = OPENELECTIONS_DEFAULT_CYCLES
             conn.execute("UPDATE sources SET is_active=1, config_json=? WHERE id=?",
                          (json.dumps(config), row["id"]))
     row = conn.execute("SELECT id, config_json FROM sources WHERE source_type='pollster_feed'").fetchone()

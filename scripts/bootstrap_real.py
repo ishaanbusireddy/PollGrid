@@ -106,6 +106,15 @@ def bootstrap_real(fec_pages: int = 40) -> None:
     except Exception as e:
         _warn("backfill_president_states", e)
 
+    _step("(f2) derive current-line district partisan leans from county results")
+    try:
+        from modeling.district_history import derive_all
+        n_rows = derive_all()
+        print(f"district history derived: {n_rows} district-cycle rows "
+              f"(confidence='derived', population-weighted areal interpolation)")
+    except Exception as e:
+        _warn("district_history", e)
+
     _step("(g) VoteView DW-NOMINATE ideology backfill")
     try:
         from scripts.backfill_voteview import run as voteview_run

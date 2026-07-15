@@ -22,7 +22,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-DEFAULT_STATES = ["GA", "PA", "MI", "WI", "AZ", "NV", "NC", "ME"]
+# All 50 states + DC (battlegrounds first so they land first under any cap).
+# Upstream OpenElections coverage is uneven — missing state/cycle files are
+# warned-and-skipped per the per-state loop, never fatal.
+DEFAULT_STATES = [
+    "GA", "PA", "MI", "WI", "AZ", "NV", "NC", "ME",
+    "AL", "AK", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "HI", "ID", "IL", "IN",
+    "IA", "KS", "KY", "LA", "MD", "MA", "MN", "MS", "MO", "MT", "NE", "NH", "NJ",
+    "NM", "NY", "ND", "OH", "OK", "OR", "RI", "SC", "SD", "TN", "TX", "UT", "VT",
+    "VA", "WA", "WV", "WY"]
 DEFAULT_CYCLES = [2016, 2020, 2024]
 RAW_BASE = "https://raw.githubusercontent.com/openelections"
 
