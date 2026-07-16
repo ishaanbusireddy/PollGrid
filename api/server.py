@@ -151,6 +151,14 @@ def bootstrap(start_ingestion: bool = False) -> None:
     entities.seed()
     races.seed()
     influence.seed()
+    # real electoral baselines seed at BOOT (the GlobeGrid pattern): hand-seeded
+    # certified national history + transcribed state presidential toplines, both
+    # INSERT OR IGNORE and zero-network — so the map colors on first run without
+    # any script, key, or fetch. Certified imports supersede the state rows.
+    from scripts.backfill_history import run as seed_national_history
+    from scripts.seed_state_presidentials import run as seed_state_history
+    seed_national_history()
+    seed_state_history()
     from ingestion import sources_seed
     sources_seed.seed()
 

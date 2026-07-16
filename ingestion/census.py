@@ -11,15 +11,24 @@ vintages — C16001 is used instead, per the architecture review §2.7.
 from __future__ import annotations
 
 import os
+import time
 
 from core import db
 from core.util import today
 from domain.geography import STATES
 from ingestion import budget
-from ingestion.http import get_json
+from ingestion.http import FetchError, get_json
 from ingestion.scheduler import register
 
 ACS_YEAR = 2023  # latest 5-year vintage assumed available; adjust in config_json when it rolls
+
+# Keyless etiquette: the Census API tolerates keyless use at a gentle rate but
+# rejects rapid bursts with a "Missing Key" HTML page — which is a RATE response,
+# not a hard key requirement. A short pause between keyless calls plus a
+# backoff-retry on that rejection makes the ~104-call bootstrap land without a
+# key. With a key there is no pause and no need to retry.
+KEYLESS_DELAY_SECONDS = 1.2
+RETRY_BACKOFFS = (5, 20, 60)  # seconds; only for rate-style rejections
 
 # category -> {variable_name: acs_variable}
 VARIABLES: dict[str, dict[str, str]] = {
@@ -57,6 +66,13 @@ def _store(tier: str, entity_id: str, values: dict[str, str | None]) -> None:
             "VALUES(?,?,?,?,?,?,?,?)", rows)
 
 
+def _rate_rejected(exc: Exception) -> bool:
+    """Census signals keyless over-rate with a 'Missing Key' HTML page (and
+    occasionally a plain 429) — retryable, unlike a genuine 4xx data error."""
+    s = str(exc).lower()
+    return "missing key" in s or "429" in s or "over_rate" in s
+
+
 def _fetch(url_base: str, geo_for: str, geo_in: str | None, key: str | None) -> list[list[str]]:
     budget.spend("census")
     params = {"get": "NAME," + ",".join(v for _, _, v in _ALL_VARS), "for": geo_for}
@@ -64,7 +80,23 @@ def _fetch(url_base: str, geo_for: str, geo_in: str | None, key: str | None) -> 
         params["in"] = geo_in
     if key:
         params["key"] = key
-    return get_json(f"{url_base}/{ACS_YEAR}/acs/acs5", params)
+    else:
+        time.sleep(KEYLESS_DELAY_SECONDS)   # keyless etiquette — don't look like a burst
+    url = f"{url_base}/{ACS_YEAR}/acs/acs5"
+    try:
+        return get_json(url, params)
+    except FetchError as e:
+        if key or not _rate_rejected(e):
+            raise
+        for backoff in RETRY_BACKOFFS:      # keyless rate rejection: back off and retry
+            time.sleep(backoff)
+            try:
+                return get_json(url, params)
+            except FetchError as e2:
+                if not _rate_rejected(e2):
+                    raise
+                e = e2
+        raise e
 
 
 def _district_entity_id(state_fips: str, cd_code: str) -> str | None:
@@ -112,13 +144,20 @@ def _bootstrap(base: str, key: str | None, state_fipses: list[str]) -> None:
     """First run only: nation + state tier + EVERY state's counties and districts
     back-to-back — ~104 budget-checked calls, well inside the 400/day census
     budget — so full coverage lands on day one instead of ~50 days of rotation.
-    Each _fetch still budget.spend()s; if the budget somehow runs dry the
-    BudgetExhausted propagates, the done-flag stays unset, and the whole
-    bootstrap re-runs next tick (all inserts are INSERT OR IGNORE, so it is
-    safe to repeat). Pack invalidation runs once at the end, not per state."""
-    _sync_national(base, key)
-    for st in state_fipses:
+
+    RESUMABLE: progress persists per state in census_bootstrap_cursor, so a
+    mid-run failure (keyless rate rejection, network blip, Ctrl+C) re-runs from
+    where it stopped, not from nation. All inserts are INSERT OR IGNORE, so any
+    overlap is harmless. Pack invalidation runs once at the end."""
+    done_through = db.meta_get("census_bootstrap_cursor")
+    if done_through != "national_done" and done_through not in state_fipses:
+        _sync_national(base, key)
+        db.meta_set("census_bootstrap_cursor", "national_done")
+        done_through = "national_done"
+    start_idx = 0 if done_through == "national_done" else state_fipses.index(done_through) + 1
+    for st in state_fipses[start_idx:]:
         _sync_state(base, st, key)
+        db.meta_set("census_bootstrap_cursor", st)  # persisted per state — resumable
     db.meta_set("census_bootstrap_done", today())
     db.meta_set("census_last_full_sync", today())
     db.meta_set("census_cursor", state_fipses[0])  # daily refresh rotation starts here

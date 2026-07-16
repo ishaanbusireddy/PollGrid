@@ -132,11 +132,21 @@ export class Analyst {
     this.session.log.push(qMsg);
     this._renderMsg(qMsg, false);
 
+    // thinking bubble with a live elapsed timer + cancel button — a long local-LLM
+    // generation must never read as a silent hang the user can't escape
     const pending = document.createElement('div');
     pending.className = 'analyst-msg a';
-    pending.innerHTML = '<span class="dim">thinking…</span><span class="caret">&nbsp;</span>';
+    pending.innerHTML = '<span class="dim">thinking… <span class="elapsed">0s</span></span> '
+      + '<button class="chip warn" style="cursor:pointer">cancel</button>';
     this.log.appendChild(pending);
     pending.scrollIntoView({ block: 'nearest' });
+    const controller = new AbortController();
+    const t0 = performance.now();
+    const timer = setInterval(() => {
+      const el = pending.querySelector('.elapsed');
+      if (el) el.textContent = `${Math.round((performance.now() - t0) / 1000)}s`;
+    }, 1000);
+    pending.querySelector('button').onclick = () => controller.abort();
 
     let res = null, err = null;
     try {
@@ -145,17 +155,21 @@ export class Analyst {
         entity_id: this.entity.id,
         question,
         session_id: this.session.session_id || undefined,
-      });
+      }, { signal: controller.signal });
     } catch (e) { err = e; }
+    clearInterval(timer);
     pending.remove();
 
     if (!res) {
+      const cancelled = err && err.message === 'cancelled';
       const aMsg = {
         role: 'a',
-        text: 'The Analyst is unreachable — the backend is offline or /api/analyst/query failed'
-          + (err && err.status ? ` (HTTP ${err.status})` : '')
-          + '. No answer was generated; nothing here is a guess.',
-        model: 'unavailable', citations: [],
+        text: cancelled
+          ? 'Cancelled. (The local model may take a while on a full question — the answer was abandoned, nothing was guessed.)'
+          : 'The Analyst is unreachable — the backend is offline or /api/analyst/query failed'
+            + (err && err.status ? ` (HTTP ${err.status})` : '')
+            + '. No answer was generated; nothing here is a guess.',
+        model: cancelled ? 'cancelled' : 'unavailable', citations: [],
       };
       this.session.log.push(aMsg);
       this._saveSession(this.session);

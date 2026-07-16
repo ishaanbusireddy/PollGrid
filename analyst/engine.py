@@ -5,11 +5,23 @@ is reachable: never an error, honestly labeled."""
 from __future__ import annotations
 
 import json
+import re
 
 from core import db
 from core.util import now_iso
 from analyst import llm
 from analyst.context_packs import get as get_pack
+
+# A trivial greeting/pleasantry must NOT trigger a full ~30k-token pack round-trip
+# against a local model — that is the "hi runs on and on" bug. These answer locally.
+_GREETING_RE = re.compile(
+    r"^(hi|hey+|hello|yo|sup|howdy|greetings|hiya|good\s?(morning|afternoon|evening)|"
+    r"thanks|thank\s?you|ty|thx|ok|okay|k|cool|nice|great|test|testing|ping)[!.…\s]*$", re.I)
+
+
+def _is_trivial(question: str) -> bool:
+    q = (question or "").strip()
+    return not q or bool(_GREETING_RE.match(q)) or len(q) < 3
 
 SYSTEM = (
     "You are PollGrid's Analyst. Answer ONLY from the context pack below. Every number you "
@@ -58,8 +70,25 @@ def _extract_citations(text: str) -> list[dict]:
     return out
 
 
+def _entity_name(entity_type: str, entity_id: str) -> str:
+    """Cheap name lookup — avoids building the whole context pack just to greet."""
+    try:
+        if entity_type == "race":
+            r = db.query_one("SELECT name FROM races WHERE id=?", (int(entity_id),))
+        elif entity_type == "candidate":
+            r = db.query_one("SELECT name FROM candidates WHERE id=?", (int(entity_id),))
+        elif entity_type == "party":
+            r = db.query_one("SELECT name FROM parties WHERE id=? OR code=?", (entity_id, entity_id))
+        elif entity_type == "state":
+            r = db.query_one("SELECT name FROM states WHERE fips_code=?", (str(entity_id),))
+        else:
+            r = None
+        return (r["name"] if r else None) or "this entity"
+    except Exception:
+        return "this entity"
+
+
 def query(entity_type: str, entity_id: str, question: str, session_id: int | None = None) -> dict:
-    pack, was_stale = get_pack(entity_type, entity_id)
     # never trust a client-supplied session_id blindly — a browser tab can hold
     # one from before a database reset/reseed, and inserting a message against
     # a session row that no longer exists is a FOREIGN KEY crash, not a 500 the
@@ -72,9 +101,26 @@ def query(entity_type: str, entity_id: str, question: str, session_id: int | Non
                                 (now_iso(), entity_type, str(entity_id)))
     db.execute("INSERT INTO analyst_messages(session_id,role,content,created_at) VALUES(?,?,?,?)",
                (session_id, "user", question, now_iso()))
+    # greeting fast-path: answer instantly WITHOUT building the (expensive) context
+    # pack or calling the LLM — this is the whole fix for "hi runs on and on"
+    if _is_trivial(question):
+        ent = _entity_name(entity_type, entity_id)
+        result = {"answer": f"Hi — I'm PollGrid's Analyst, looking at {ent}. Ask me about its poll "
+                            f"average, forecast, demographics, or key factors and I'll answer only "
+                            f"from the platform's own cited data.",
+                  "citations": [], "model": "greeting"}
+        db.execute("INSERT INTO analyst_messages(session_id,role,content,citations_json,model,created_at) "
+                   "VALUES(?,?,?,?,?,?)", (session_id, "analyst", result["answer"], "[]", "greeting", now_iso()))
+        result["session_id"] = session_id
+        result["pack_stale"] = False
+        return result
+    pack, was_stale = get_pack(entity_type, entity_id)
     history = db.query("SELECT role, content FROM analyst_messages WHERE session_id=? "
                        "ORDER BY id DESC LIMIT 6", (session_id,))
-    prompt = (f"{SYSTEM}\n\nCONTEXT PACK:\n{json.dumps(pack, default=str)[:110000]}\n\n"
+    # scale the context to the question: a short question doesn't need the full
+    # ~30k-token pack (which dominates prefill time on a local model)
+    pack_chars = 110000 if len(question.strip()) >= 40 else 24000
+    prompt = (f"{SYSTEM}\n\nCONTEXT PACK:\n{json.dumps(pack, default=str)[:pack_chars]}\n\n"
               + "".join(f"{m['role']}: {m['content']}\n" for m in reversed(history[1:]))
               + f"user question: {question}\nanalyst:")
     text = llm.complete(prompt, purpose="analyst_qa", interactive=True)

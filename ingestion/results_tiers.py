@@ -218,9 +218,10 @@ def run_tier2(source: dict) -> None:
 
 def _insert_history_row(tier: str, entity_id: str, office: str, cycle: int,
                         parties: dict[str, int]) -> None:
-    """Real certified data ALWAYS beats a synthetic placeholder occupying the
-    same UNIQUE slot: on conflict, replace only when the existing row is
-    synthetic — never touch an existing real row."""
+    """Certified vote-count data ALWAYS beats whatever weaker row occupies the
+    same UNIQUE slot: a synthetic placeholder, a derived areal estimate, or a
+    hand-transcribed 'uncertain' topline (seed_state_presidentials.py). It never
+    touches an existing genuinely-measured row — certified data is idempotent."""
     total = sum(parties.values()) or 1
     dem, rep = parties.get("DEM", 0), parties.get("REP", 0)
     winner = max(parties, key=parties.get)
@@ -232,7 +233,7 @@ def _insert_history_row(tier: str, entity_id: str, office: str, cycle: int,
         "winner_party=excluded.winner_party, dem_pct=excluded.dem_pct, rep_pct=excluded.rep_pct, "
         "other_pct=excluded.other_pct, margin_pct=excluded.margin_pct, confidence=excluded.confidence, "
         "source=excluded.source, is_synthetic=0 "
-        "WHERE political_history.is_synthetic=1",
+        "WHERE political_history.is_synthetic=1 OR political_history.confidence!='measured'",
         (tier, entity_id, office, "regular", cycle, winner,
          100 * dem / total, 100 * rep / total, 100 * (total - dem - rep) / total,
          100 * abs(dem - rep) / total, "measured", f"openelections:{cycle}"))

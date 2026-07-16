@@ -31,6 +31,7 @@ export class Diagnostics {
       <h1>Status &amp; diagnostics</h1>
       <p class="dim">Live platform health: the analyst LLM, provenance hash-chains, DB integrity, synthetic data, and every ingestion source.</p>
       <div class="diag-llm"><div class="dim">checking…</div></div>
+      <div class="diag-foundation"></div>
       <div class="row mt" style="align-items:flex-start">
         <div class="panel diag-chains" style="flex:1;min-width:300px;margin:0"><div class="panel-head">Provenance hash-chains</div><div class="panel-body"><div class="dim">loading…</div></div></div>
         <div class="panel diag-integrity" style="flex:1;min-width:300px;margin:0"><div class="panel-head">Integrity checks</div><div class="panel-body"><div class="dim">loading…</div></div></div>
@@ -55,6 +56,31 @@ export class Diagnostics {
         </div>`;
     } else {
       llmBox.innerHTML = `<div class="empty">LLM status unavailable.<span class="why">GET /api/diagnostics failed — backend offline</span></div>`;
+    }
+
+    /* ----- data foundation — WHY maps are blank, answered at a glance ----- */
+    const fBox = this.el.querySelector('.diag-foundation');
+    const fd = status && status.data_foundation;
+    if (fBox && fd) {
+      const tiers = ['nation', 'state', 'county_equivalent', 'congressional_district'];
+      const row = (name, obj) => `<tr><td class="mono" style="font-size:11px">${name}</td>
+        ${tiers.map((t) => {
+          const n = (obj && obj[t]) || 0;
+          return `<td class="${n === 0 ? 'err' : ''}" style="${n === 0 ? 'color:var(--rep,#c04f4f);font-weight:700' : ''}">${n}</td>`;
+        }).join('')}</tr>`;
+      const banner = fd.healthy ? '' :
+        `<div class="diag-llm-card down" style="margin:8px 0">
+           <div class="diag-llm-main">Real data foundation is EMPTY — maps and scorecards will look blank</div>
+           <div class="diag-llm-sub">The rows below are what every visible surface is computed from. Zeros mean the
+           Census / OpenElections imports have not landed (check Source health below for the error, e.g. a missing
+           CENSUS_API_KEY). Run <b>python scripts/bootstrap_real.py</b> and re-check.</div>
+         </div>`;
+      fBox.innerHTML = `${banner}
+        <div class="panel" style="margin:8px 0"><div class="panel-head">Data foundation (real rows by tier)</div>
+        <div class="panel-body"><table class="grid">
+          <thead><tr><th>table</th>${tiers.map((t) => `<th>${t.replace('_', ' ')}</th>`).join('')}</tr></thead>
+          <tbody>${row('political_history', fd.political_history)}${row('demographics', fd.demographics)}</tbody>
+        </table></div></div>`;
     }
 
     /* ----- hash-chain table ----- */

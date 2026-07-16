@@ -40,15 +40,19 @@ export class Api {
     try { return await this.get(path, params); } catch (e) { return null; }
   }
 
-  async post(path, body) {
+  async post(path, body, { signal } = {}) {
     let res;
     try {
       res = await fetch(this._url(path), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal,
       });
-    } catch (e) { throw new ApiError(0, 'network unreachable'); }
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new ApiError(0, 'cancelled');
+      throw new ApiError(0, 'network unreachable');
+    }
     if (!res.ok) {
       let msg = `HTTP ${res.status}`;
       try { msg = (await res.json()).error || msg; } catch (_) { /* keep default */ }
@@ -113,7 +117,7 @@ export class Api {
   }
 
   /* ----- analyst ----- */
-  analystQuery(body) { return this.post('/api/analyst/query', body); }
+  analystQuery(body, opts) { return this.post('/api/analyst/query', body, opts); }
 
   /* ----- settings / managed API keys (stored in .env, never the DB) ----- */
   settingsKeys() { return this.tryGet('/api/settings/keys'); }

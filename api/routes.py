@@ -18,6 +18,21 @@ def _as_of(req) -> str:
 
 # ------------------------------ status & meta ------------------------------
 
+def data_foundation() -> dict:
+    """Per-tier REAL-row counts for the two foundation tables everything visible
+    sits on. When these are zero, maps/scorecards are blank — and that emptiness
+    must be LOUD, not a mystery buried behind an hours-long bootstrap step."""
+    out: dict = {"political_history": {}, "demographics": {}}
+    for t in ("nation", "state", "county_equivalent", "congressional_district"):
+        out["political_history"][t] = db.query_one(
+            "SELECT COUNT(*) c FROM political_history WHERE tier=? AND is_synthetic=0", (t,))["c"]
+        out["demographics"][t] = db.query_one(
+            "SELECT COUNT(*) c FROM demographics WHERE tier=? AND is_synthetic=0", (t,))["c"]
+    out["healthy"] = (out["political_history"]["state"] > 0
+                      and out["demographics"]["state"] > 0)
+    return out
+
+
 @route("GET", "/api/status")
 def status(req):
     from core.version import VERSION
@@ -26,6 +41,7 @@ def status(req):
               for t in ("races", "polls", "candidates", "stories")}
     counts["facts"] = db.query_one("SELECT COUNT(*) c FROM extracted_facts")["c"]
     return {"version": VERSION, "sources": sources, "counts": counts,
+            "data_foundation": data_foundation(),
             "election_night_mode": db.meta_get("election_night_mode") == "1"}
 
 
@@ -658,9 +674,10 @@ def map_values(req):
         from modeling.fundamentals import partisan_lean
 
         def _lean_conf(race):
-            # confidence of the president-history rows partisan_lean read: 'derived'
-            # (areal-interpolated district lean) hatches the map; 'measured' does not.
-            # If any input row is derived, surface derived (honest — it's an estimate).
+            # confidence of the president-history rows partisan_lean read. Anything
+            # short of certified-measured (an areal-interpolated district lean, or a
+            # hand-transcribed 'uncertain' state topline) hatches the map as an
+            # estimate — measured data renders clean.
             t, e = ("state", race["state_fips"])
             if race["district_version_id"]:
                 t, e = "congressional_district", str(race["district_version_id"])
@@ -671,7 +688,7 @@ def map_values(req):
                             (t, e))
             if not rows:
                 return None
-            return "derived" if any(x["confidence"] == "derived" for x in rows) else "measured"
+            return "derived" if any(x["confidence"] != "measured" for x in rows) else "measured"
 
         for r in races_:
             key = r["state_fips"]
@@ -699,7 +716,39 @@ def map_values(req):
                                  "AND office=? ORDER BY cycle_year DESC LIMIT 1", (r["state_fips"], rt))
                 if h and h["turnout_pct"] is not None:
                     values[key] = h["turnout_pct"]
-        if tier == "county" and values:
+        if mode == "partisan_lean" and tier != "district":
+            # partisan lean is a property of the STATE, not of whether it happens to
+            # have a race of this type this cycle — a state with no 2026 senate seat
+            # (CA, VT, ...) must still color. Fill every state the race loop missed.
+            from domain.geography import STATES as _ST
+            for fips in _ST:
+                if fips in values:
+                    continue
+                pseudo = {"state_fips": fips, "district_version_id": None}
+                lean = partisan_lean(pseudo)
+                if lean:
+                    values[fips] = lean
+                    c = _lean_conf({"state_fips": fips, "district_version_id": None})
+                    if c:
+                        confidence[fips] = c
+        if tier == "county" and values and any(len(k) > 2 for k in values):
+            # HOUSE at county zoom: values are DISTRICT-geoid-keyed, so the state
+            # fan-out below can never match (pre-v4.1 this painted uniform no-data).
+            # Fan each county to its DOMINANT district via the persisted
+            # county<->district area-share table instead — each county takes the
+            # value of the district covering most of its area.
+            fanned, fanned_conf = {}, {}
+            for row in db.query(
+                    "SELECT county_geoid, district_geoid, MAX(share) FROM county_district_area_shares "
+                    "GROUP BY county_geoid"):
+                v = values.get(row["district_geoid"])
+                if v is None:
+                    continue
+                fanned[row["county_geoid"]] = v
+                if row["district_geoid"] in confidence:
+                    fanned_conf[row["county_geoid"]] = confidence[row["district_geoid"]]
+            values, confidence = fanned, fanned_conf
+        elif tier == "county" and values:
             # statewide race-typed values are keyed by 2-digit state_fips, but the
             # county LOD draws 5-digit county geoids — fan each state's value onto all
             # its counties so the county layer recolors instead of painting uniform no-data

@@ -84,6 +84,37 @@ def _post(url: str, payload: dict, headers: dict, timeout: float = 120.0,
         return None
 
 
+def _stream_ollama(model: str, prompt: str, timeout: float,
+                   cancel: threading.Event | None) -> str | None:
+    """Streamed /api/generate: reads Ollama's newline-delimited JSON and checks the
+    cancel flag BETWEEN chunks — so a background generation is genuinely dropped the
+    moment an interactive request arrives (real two-lane preemption, which stream:False
+    could never do), and a long generation is interruptible instead of a 300s block."""
+    data = _json.dumps({"model": model, "prompt": prompt, "stream": True}).encode()
+    req = urllib.request.Request(cfg("llm_provider.ollama.host") + "/api/generate",
+                                 data=data, headers={"Content-Type": "application/json"})
+    chunks: list[str] = []
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for line in resp:
+                if cancel is not None and cancel.is_set():
+                    return None  # closing resp here drops the socket → frees the lock early
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if obj.get("response"):
+                    chunks.append(obj["response"])
+                if obj.get("done"):
+                    break
+    except Exception:
+        pass
+    return "".join(chunks) or None
+
+
 def _complete_ollama(prompt: str, interactive: bool) -> str | None:
     if not interactive:
         if _interactive_waiting.is_set():
@@ -91,22 +122,18 @@ def _complete_ollama(prompt: str, interactive: bool) -> str | None:
         _bg_cancel.clear()
     else:
         _interactive_waiting.set()
-        _bg_cancel.set()  # cancel any in-flight background generation
+        _bg_cancel.set()  # cancel any in-flight background generation (now real, via streaming)
     # a full context pack is a large prompt for a local model to prefill+generate
     # against; the default 120s _post() timeout is tuned for short rubric/prose
     # calls and is too tight for this — give interactive calls real headroom.
     timeout = cfg("llm_provider.ollama.interactive_timeout_seconds") if interactive else 120.0
     try:
         with _ollama_lock:
-            out = _post(cfg("llm_provider.ollama.host") + "/api/generate",
-                        {"model": cfg("llm_provider.ollama.default_model"),
-                         "prompt": prompt, "stream": False},
-                        {}, timeout=timeout, cancel=None if interactive else _bg_cancel)
+            out = _stream_ollama(cfg("llm_provider.ollama.default_model"), prompt, timeout,
+                                 None if interactive else _bg_cancel)
             if out is None and interactive:
-                out = _post(cfg("llm_provider.ollama.host") + "/api/generate",
-                            {"model": cfg("llm_provider.ollama.fallback_model"),
-                             "prompt": prompt, "stream": False}, {}, timeout=timeout)
-            return out.get("response") if out else None
+                out = _stream_ollama(cfg("llm_provider.ollama.fallback_model"), prompt, timeout, None)
+            return out
     finally:
         if interactive:
             _interactive_waiting.clear()
