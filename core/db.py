@@ -458,6 +458,14 @@ CREATE TABLE IF NOT EXISTS redistricting_fairness_scores (
   UNIQUE (state_fips, congress_number, as_of)
 );
 
+-- Persistent county->district area shares (modeling/areal.py). A pure function of the
+-- vendored geometry (cycle-independent), so it is cached once and reused across every
+-- nightly run; invalidated only when the geometry fingerprint (app_meta) changes.
+CREATE TABLE IF NOT EXISTS county_district_area_shares (
+  county_geoid TEXT NOT NULL, district_geoid TEXT NOT NULL, share REAL NOT NULL,
+  UNIQUE (county_geoid, district_geoid)
+);
+
 CREATE TABLE IF NOT EXISTS computation_audit_log (
   metric_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, metric_type TEXT NOT NULL,
   scope TEXT NOT NULL, formula TEXT NOT NULL, inputs_json TEXT NOT NULL, output_json TEXT NOT NULL

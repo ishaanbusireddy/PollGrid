@@ -585,23 +585,27 @@ export class SlidePane {
         `GET /api/factors/${raceId} empty — degrades to quantitative-only, never guesses`));
       return root;
     }
-    const t = el(`<table class="grid"><thead><tr><th>Factor</th><th>Family</th><th>Method</th><th>Score</th><th>Cited</th></tr></thead><tbody></tbody></table>`);
+    const t = el(`<table class="grid"><thead><tr><th>Factor</th><th>Method</th><th>Score</th><th>Why</th></tr></thead><tbody></tbody></table>`);
     const tb = t.querySelector('tbody');
     for (const fac of f.factors) {
-      const methodChip = fac.method === 'deterministic' ? 'ok' : fac.method === 'llm_rubric' ? 'warn' : '';
+      const methodChip = fac.method === 'deterministic' ? 'ok' : fac.method === 'llm_rubric' ? 'warn' : 'dim';
       const score = Number(fac.score) || 0;
       const w = Math.min(100, Math.abs(score) * 50);
+      // "Why" makes a neutral scorecard self-explaining: for a neutral_fallback the
+      // rationale now states the HONEST reason (no cited facts vs no provider); for a
+      // scored factor it shows the rubric reasoning or the deterministic grounding.
+      const why = fac.rationale || (fac.method === 'deterministic' ? fac.grounding : '');
+      const cites = (fac.citations || []).map((c) => `<span class="cite-chip" title="fact #${escapeHtml(String(c))}">${escapeHtml(String(c))}</span>`).join('');
       const tr = el(`<tr>
-        <td title="${escapeHtml(fac.rationale || '')}">${escapeHtml(fac.name || fac.key)}</td>
-        <td class="dim" style="font-size:10px">${escapeHtml(fac.family || '')}</td>
+        <td>${escapeHtml(fac.name || fac.key)}<div class="dim" style="font-size:9px">${escapeHtml(fac.family || '')}</div></td>
         <td><span class="chip ${methodChip}">${escapeHtml(fac.method || '?')}</span></td>
         <td><div class="bar-track" style="width:70px"><span class="bar-fill ${score >= 0 ? 'dem' : 'rep'}" style="width:${w}%"></span></div></td>
-        <td class="mono" style="font-size:10px">${(fac.citations || []).map((c) => `<span class="cite-chip" title="fact #${escapeHtml(String(c))}">${escapeHtml(String(c))}</span>`).join('') || '—'}</td>
+        <td class="dim" style="font-size:10px">${escapeHtml(why || '—')}${cites ? ' ' + cites : ''}</td>
       </tr>`);
       tb.appendChild(tr);
     }
     body.appendChild(t);
-    body.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:4px">as of ${escapeHtml(f.as_of || '?')} · scored against a fixed rubric, cited, cached — never open-ended; neutral_fallback = no LLM was reachable</div>`));
+    body.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:4px">as of ${escapeHtml(f.as_of || '?')} · scored against a fixed rubric, cited, cached — never open-ended. A <b>neutral_fallback</b> row shows in "Why" exactly why it is neutral (no cited facts yet, or no AI provider reachable) — it is honest absence, never a guess.</div>`));
     return root;
   }
 

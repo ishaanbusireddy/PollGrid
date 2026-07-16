@@ -61,6 +61,11 @@ def run(source: dict) -> None:
     page = int(db.meta_get("fec_page", "1"))
     cycle = CYCLES[int(db.meta_get("fec_cycle_idx", "0")) % len(CYCLES)]
 
+    # marquee-first: fill competitive-race finance BEFORE the alphabetical roster
+    # walk spends the (DEMO_KEY-tight) budget, so the most-viewed races don't wait
+    # for the whole roster page-through to complete
+    _priority_finance_pass(base, key, cycle)
+
     budget.spend("fec")
     data = get_json(f"{base}/candidates/", {
         "api_key": key, "election_year": cycle, "per_page": 100, "page": page,
@@ -102,6 +107,45 @@ def run(source: dict) -> None:
         db.meta_set("fec_page", str(page + 1))
 
 
+def _fetch_candidate_totals(base: str, key: str, cid: int, fec_id: str, cycle: int) -> bool:
+    """Pull one candidate's __totals__ (receipts). Returns False if the budget is
+    exhausted (caller should stop), True otherwise."""
+    try:
+        budget.spend("fec")
+    except Exception:
+        return False
+    data = get_json(f"{base}/candidate/{fec_id}/totals/", {"api_key": key, "cycle": cycle, "per_page": 1})
+    for t in data.get("results", [])[:1]:
+        with db.write() as conn:
+            conn.execute("DELETE FROM donors_aggregated WHERE candidate_id=? AND cycle_year=? "
+                         "AND contributor_name='__totals__'", (cid, cycle))
+            conn.execute(
+                "INSERT INTO donors_aggregated(candidate_id,contributor_name,total_amount,"
+                "n_contributions,cycle_year,source) VALUES(?,?,?,?,?,?)",
+                (cid, "__totals__", t.get("receipts") or 0, 0, cycle, f"openfec:totals:{cycle}"))
+    return True
+
+
+def _priority_finance_pass(base: str, key: str, cycle: int) -> None:
+    """Marquee-race-first: pull finance totals for candidates in COMPETITIVE races
+    BEFORE the alphabetical roster walk consumes the request budget — so the
+    highest-value (most-viewed) races fill in first, every run, without waiting for
+    the whole roster page-through to complete. Bounded + rotated so it never
+    starves the roster entirely."""
+    rows = db.query(
+        "SELECT DISTINCT c.id, c.fec_candidate_id FROM candidates c "
+        "JOIN race_candidates rc ON rc.candidate_id=c.id JOIN races r ON r.id=rc.race_id "
+        "WHERE c.fec_candidate_id IS NOT NULL AND r.competitiveness IN ('tossup','lean') "
+        "ORDER BY CASE r.competitiveness WHEN 'tossup' THEN 0 ELSE 1 END, c.id")
+    if not rows:
+        return
+    offset = int(db.meta_get("fec_priority_cursor", "0")) % len(rows)
+    db.meta_set("fec_priority_cursor", str((offset + FINANCE_CANDIDATES_PER_RUN) % len(rows)))
+    for r in (rows + rows)[offset:offset + min(FINANCE_CANDIDATES_PER_RUN, len(rows))]:
+        if not _fetch_candidate_totals(base, key, r["id"], r["fec_candidate_id"], cycle):
+            return
+
+
 def _pull_finance_batch(base: str, key: str, cycle: int) -> None:
     """__totals__ (receipts) for linked candidates — fundraising trend input.
     Rotated across runs via fec_finance_cursor so the WHOLE roster eventually gets
@@ -117,21 +161,8 @@ def _pull_finance_batch(base: str, key: str, cycle: int) -> None:
     db.meta_set("fec_finance_cursor", str((offset + FINANCE_CANDIDATES_PER_RUN) % len(all_rows)))
     rows = (all_rows + all_rows)[offset:offset + min(FINANCE_CANDIDATES_PER_RUN, len(all_rows))]
     for r in rows:
-        try:
-            budget.spend("fec")
-        except Exception:
+        if not _fetch_candidate_totals(base, key, r["id"], r["fec_candidate_id"], cycle):
             return
-        data = get_json(f"{base}/candidate/{r['fec_candidate_id']}/totals/",
-                        {"api_key": key, "cycle": cycle, "per_page": 1})
-        for t in data.get("results", [])[:1]:
-            with db.write() as conn:
-                conn.execute("DELETE FROM donors_aggregated WHERE candidate_id=? AND cycle_year=? "
-                             "AND contributor_name='__totals__'", (r["id"], cycle))
-                conn.execute(
-                    "INSERT INTO donors_aggregated(candidate_id,contributor_name,total_amount,"
-                    "n_contributions,cycle_year,source) VALUES(?,?,?,?,?,?)",
-                    (r["id"], "__totals__", t.get("receipts") or 0, 0, cycle,
-                     f"openfec:totals:{cycle}"))
 
 
 # ---------------------------------------------------------------------------

@@ -198,7 +198,10 @@ export class Analyst {
       el.appendChild(cites);
       const foot = document.createElement('span');
       foot.className = 'model-note';
-      const modelLabel = m.model === 'deterministic' ? 'deterministic fallback (no LLM was reachable)' : `model: ${m.model}`;
+      // the backend already states the honest reason for a deterministic answer
+      // (no provider / timed out / thin data) inside the answer text itself — don't
+      // hard-code "no LLM was reachable" here, which is often false
+      const modelLabel = m.model === 'deterministic' ? 'deterministic answer (reason in text above)' : `model: ${m.model}`;
       foot.textContent = modelLabel + (m.stale ? ' · context pack stale' : '');
       el.appendChild(foot);
       el.scrollIntoView({ block: 'nearest' });

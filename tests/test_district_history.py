@@ -86,5 +86,42 @@ class TestDistrictInterpolation(unittest.TestCase):
         self.assertEqual(derive_all(), 0)
 
 
+class TestDistrictDemographics(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        db.migrate()
+        from domain import geography, entities, races
+        geography.seed(); entities.seed(); races.seed()
+        from core.gazetteer import _load_features
+        cls.az = [f["id"] for f in _load_features("us_counties.json")
+                  if (f.get("id") or "").startswith("04")][:6]
+
+    def test_apportions_counts_conserves_total_and_skips_rates(self):
+        from modeling.district_demographics import derive_all
+        pop_total = 0
+        for i, g in enumerate(self.az):
+            pop = 200000 + i * 100000
+            pop_total += pop
+            for cat, var, val in (("population_age", "total_population", pop),
+                                  ("education", "pop_25plus", pop * 0.7),
+                                  ("education", "bachelors", pop * 0.2),
+                                  ("population_age", "median_age", 38)):
+                db.execute("INSERT OR REPLACE INTO demographics(tier,entity_id,as_of,category,variable,"
+                           "value,confidence,source,is_synthetic) VALUES('county_equivalent',?,'2024-01-01',"
+                           "?,?,?,'measured','census',0)", (g, cat, var, val))
+        n = derive_all()
+        self.assertGreater(n, 0)
+        # rate variable must be skipped entirely
+        self.assertEqual(db.query_one("SELECT COUNT(*) c FROM demographics WHERE "
+                         "tier='congressional_district' AND variable='median_age'")["c"], 0)
+        # extensive count is conserved by areal apportionment (shares sum to 1)
+        dist_total = db.query_one("SELECT SUM(value) s FROM demographics WHERE "
+                     "tier='congressional_district' AND variable='total_population'")["s"]
+        self.assertAlmostEqual(dist_total, pop_total, delta=pop_total * 0.001)
+        for r in db.query("SELECT confidence, source FROM demographics WHERE tier='congressional_district'"):
+            self.assertEqual(r["confidence"], "derived")
+            self.assertTrue(r["source"].startswith("derived:areal_apportionment"))
+
+
 if __name__ == "__main__":
     unittest.main()

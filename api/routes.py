@@ -656,6 +656,23 @@ def map_values(req):
         from modeling.averaging import latest_average
         from modeling.forecasting import latest as forecast_latest
         from modeling.fundamentals import partisan_lean
+
+        def _lean_conf(race):
+            # confidence of the president-history rows partisan_lean read: 'derived'
+            # (areal-interpolated district lean) hatches the map; 'measured' does not.
+            # If any input row is derived, surface derived (honest — it's an estimate).
+            t, e = ("state", race["state_fips"])
+            if race["district_version_id"]:
+                t, e = "congressional_district", str(race["district_version_id"])
+            elif not race["state_fips"]:
+                return None
+            rows = db.query("SELECT confidence FROM political_history WHERE tier=? AND entity_id=? "
+                            "AND office='president' AND dem_pct IS NOT NULL ORDER BY cycle_year DESC LIMIT 2",
+                            (t, e))
+            if not rows:
+                return None
+            return "derived" if any(x["confidence"] == "derived" for x in rows) else "measured"
+
         for r in races_:
             key = r["state_fips"]
             if r["district_version_id"]:
@@ -666,6 +683,9 @@ def map_values(req):
                 continue
             if mode == "partisan_lean":
                 values[key] = partisan_lean(r)
+                c = _lean_conf(r)
+                if c:
+                    confidence[key] = c
             elif mode == "average_margin":
                 avg = latest_average(r["id"], as_of)
                 if avg:
