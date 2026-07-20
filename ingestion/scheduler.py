@@ -39,6 +39,12 @@ def _interval_for(source: dict) -> float:
     base = cfg(f"ingestion.intervals_seconds.{key}")
     if key == "results_native" and db.meta_get("election_night_mode") == "1":
         return cfg("ingestion.election_night.results_native_seconds")
+    # FEC roster catch-up: until the candidate roster has been walked once
+    # (fec_roster_synced_at), drain pages back-to-back so race_candidates — which
+    # poll resolution requires — fills in minutes instead of ~1 page/hour. Reverts
+    # to the hourly base the instant the roster completes.
+    if key == "fec" and not db.meta_get("fec_roster_synced_at"):
+        return cfg("ingestion.intervals_seconds.fec_catchup")
     return base
 
 

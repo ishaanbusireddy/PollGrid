@@ -221,6 +221,9 @@ async function boot() {
   });
   socket.connect();
   pollStories(); // backfill existing story clusters at boot; pushes dedup via feed.seen
+  // map heartbeat: re-color the current mode every 3 min so the map breathes even
+  // if the websocket is down and no recompute frame arrives (pane-safe: map only)
+  setInterval(() => liveRefresh({ remap: true }), 180000);
 
   async function pollStories() {
     const rows = await api.stories(lastStorySince);
@@ -229,6 +232,26 @@ async function boot() {
       feed.addStory(s);
       if (s.updated_at && s.updated_at > lastStorySince) lastStorySince = s.updated_at;
     }
+  }
+
+  // which open pane types carry live numbers worth re-rendering on a recompute
+  const LIVE_REFRESHABLE = new Set(['race', 'state', 'district']);
+
+  /** Push freshly-landed/recomputed data into whatever the user is looking at,
+      without a full reload. remap re-colors the map (cheap); panes re-renders an
+      open detail pane (race/state/district) and the Polls browser if active;
+      raceId scopes a poll refresh to only the matching open race. */
+  function liveRefresh({ raceId = null, remap = false, panes = false } = {}) {
+    if (remap && map) loadMapValues();
+    if (panes && pane && pane.current && pane.root.classList.contains('open')) {
+      const cur = pane.current;
+      if (raceId != null) {
+        if (cur.type === 'race' && String(cur.id) === String(raceId)) pane.open(cur, true);
+      } else if (LIVE_REFRESHABLE.has(cur.type)) {
+        pane.open(cur, true);
+      }
+    }
+    if (panes && (location.hash || '').startsWith('#/polls') && pollsWindow.load) pollsWindow.load();
   }
 
   function handleFrame(frame) {
@@ -240,6 +263,11 @@ async function boot() {
     } else if (frame.type === 'poll') {
       sound.pollChime();
       toast(`New poll: ${p.pollster || '?'} — ${p.race_name || 'race #' + p.race_id}`);
+      liveRefresh({ raceId: p.race_id, panes: true }); // update the open race if it's this one
+    } else if (frame.type === 'recompute') {
+      // the server's deterministic fast loop refreshed averages/forecasts/map —
+      // re-color the map and re-render the open data pane / Polls browser
+      liveRefresh({ remap: true, panes: true });
     } else if (frame.type === 'volatility') {
       // volatility feature removed from the UI — frame intentionally ignored
     } else if (frame.type === 'race_call') {

@@ -16,9 +16,10 @@ SCHEMA: dict = {
     "ingestion": {
         "intervals_seconds": {
             k: (int, 5, 604800)
-            for k in ("polls", "fec", "census", "congress_gov", "news_rss",
+            for k in ("polls", "fec", "fec_catchup", "census", "congress_gov", "news_rss",
                       "targeted_search", "markets", "social", "results_native")
         },
+        "live_recompute_seconds": (int, 30, 86400),
         "election_night": {"results_native_seconds": (int, 5, 3600)},
         "ap_elections": {"enabled": (bool, None, None), "api_key_env": (str, None, None)},
         "resilience": {

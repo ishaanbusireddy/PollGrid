@@ -188,6 +188,10 @@ def bootstrap(start_ingestion: bool = False) -> None:
         print(f"ingestion: {n} source thread(s) running")
         from modeling.nightly import start_thread
         start_thread(stop_event)
+        # continuous deterministic recompute (averages/forecasts/map) so derived
+        # data moves as raw data lands — the LLM-heavy nightly stays once/day
+        from modeling.live_recompute import start_thread as start_recompute
+        start_recompute(stop_event)
 
 
 def create_app(port: int | None = None, start_ingestion: bool = True) -> App:

@@ -12,6 +12,8 @@ ingestion:
   intervals_seconds:
     polls: 900              # 15 min
     fec: 3600
+    fec_catchup: 5          # while the roster is unsynced, drain pages back-to-back
+                            # so race_candidates (which polls need) fills in minutes
     census: 86400           # daily check; the data itself changes far less often
     congress_gov: 3600
     news_rss: 120
@@ -19,6 +21,8 @@ ingestion:
     markets: 300
     social: 900
     results_native: 30      # tightened by election-night mode (ingestion/scheduler.py)
+  live_recompute_seconds: 600  # deterministic fast pipeline (averages/forecasts/map)
+                               # cadence — separate from the once-a-day LLM nightly
   election_night:
     results_native_seconds: 15
   ap_elections:

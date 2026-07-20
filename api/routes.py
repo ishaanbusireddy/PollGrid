@@ -58,10 +58,23 @@ def diagnostics(req):
     synth = sum(db.query_one(f"SELECT COUNT(*) c FROM {t} WHERE is_synthetic=1")["c"]
                 for t in ("polls", "raw_items", "extracted_facts", "demographics", "races",
                           "results_live", "stories", "political_history"))
+    def _c(sql):
+        return db.query_one(sql)["c"]
+    live = {
+        "fec_roster_synced_at": db.meta_get("fec_roster_synced_at"),
+        "fec_page": db.meta_get("fec_page"),
+        "race_candidates": _c("SELECT COUNT(*) c FROM race_candidates"),
+        "polls": _c("SELECT COUNT(*) c FROM polls WHERE is_synthetic=0"),
+        "poll_averages": _c("SELECT COUNT(*) c FROM poll_averages"),
+        "stories": _c("SELECT COUNT(*) c FROM stories"),
+        "raw_items": _c("SELECT COUNT(*) c FROM raw_items"),
+        "last_recompute_at": db.meta_get("live_recompute_at"),
+        "last_nightly_at": db.meta_get(f"nightly:{today()}"),
+    }
     return {"llm": current_provider(),
             "chains": [{"table": t, "ok": ok, "detail": d} for t, ok, d in provenance.verify_all()],
             "integrity": run_integrity_checks(), "db_path": DB_PATH, "synthetic_rows": synth,
-            "keys": keys.status()}
+            "keys": keys.status(), "live": live}
 
 
 # ------------------------------ geography ------------------------------

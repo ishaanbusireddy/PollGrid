@@ -32,6 +32,7 @@ export class Diagnostics {
       <p class="dim">Live platform health: the analyst LLM, provenance hash-chains, DB integrity, synthetic data, and every ingestion source.</p>
       <div class="diag-llm"><div class="dim">checking…</div></div>
       <div class="diag-foundation"></div>
+      <div class="panel diag-live"><div class="panel-head">Live pipeline</div><div class="panel-body"><div class="dim">loading…</div></div></div>
       <div class="panel diag-keys"><div class="panel-head">API keys</div><div class="panel-body"><div class="dim">loading…</div></div></div>
       <div class="row mt" style="align-items:flex-start">
         <div class="panel diag-chains" style="flex:1;min-width:300px;margin:0"><div class="panel-head">Provenance hash-chains</div><div class="panel-body"><div class="dim">loading…</div></div></div>
@@ -82,6 +83,36 @@ export class Diagnostics {
           <thead><tr><th>table</th>${tiers.map((t) => `<th>${t.replace('_', ' ')}</th>`).join('')}</tr></thead>
           <tbody>${row('political_history', fd.political_history)}${row('demographics', fd.demographics)}</tbody>
         </table></div></div>`;
+    }
+
+    /* ----- Live pipeline — is data actually flowing in right now? ----- */
+    const liveBox = this.el.querySelector('.diag-live .panel-body');
+    const lv = diag && diag.live;
+    if (liveBox && lv) {
+      const ago = (ts) => {
+        if (!ts) return '<span class="dim">never</span>';
+        const s = Math.max(0, Math.round((Date.now() - new Date(ts.replace(' ', 'T')).getTime()) / 1000));
+        return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+      };
+      const rosterDone = !!lv.fec_roster_synced_at;
+      const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+      liveBox.innerHTML =
+        kv('FEC candidate roster', rosterDone
+            ? `<span class="chip ok">synced</span>`
+            : `<span class="chip warn">building — page ${escapeHtml(String(lv.fec_page || '1'))}</span>`)
+        + kv('race_candidates (polls need ≥2/race)', `<span class="chip ${lv.race_candidates > 0 ? 'ok' : 'warn'}">${Number(lv.race_candidates).toLocaleString()}</span>`)
+        + kv('polls ingested', `<span class="chip ${lv.polls > 0 ? 'ok' : ''}">${Number(lv.polls).toLocaleString()}</span>`)
+        + kv('poll averages', String(Number(lv.poll_averages).toLocaleString()))
+        + kv('news stories', String(Number(lv.stories).toLocaleString()))
+        + kv('raw items ingested', String(Number(lv.raw_items).toLocaleString()))
+        + kv('fast recompute', ago(lv.last_recompute_at))
+        + kv('nightly (full)', ago(lv.last_nightly_at));
+      if (!rosterDone) {
+        liveBox.insertAdjacentHTML('beforeend',
+          `<div class="dim" style="font-size:10px;margin-top:6px">The FEC roster is still building (drains fast on a running server, or run <span class="mono">python scripts/bootstrap_real.py</span> to finish it now). Polls can only resolve once a race has ≥2 linked candidates.</div>`);
+      }
+    } else if (liveBox) {
+      liveBox.innerHTML = `<div class="empty">Live-pipeline status unavailable.<span class="why">GET /api/diagnostics failed</span></div>`;
     }
 
     /* ----- API keys — makes "did my key take effect?" answerable at a glance ----- */

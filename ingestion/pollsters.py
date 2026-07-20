@@ -310,19 +310,45 @@ def _published_date(published: str | None) -> str:
     return today()
 
 
+def _fetch_article_text(url: str | None) -> str | None:
+    """Fetch a pollster-release article ONCE and return its stripped text. The
+    horse-race toplines almost always live in the article body, not the RSS
+    teaser — so when the excerpt yields nothing we pull the linked page and parse
+    that. Dedup by URL (app_meta), size-capped, and failure-silent: it never
+    hammers a host and a fetch error just means 'no poll from this item'."""
+    if not url:
+        return None
+    seen_key = f"poll_article_fetched:{url}"
+    if db.meta_get(seen_key):
+        return None  # fetched once already — don't re-pull on every cycle
+    db.meta_set(seen_key, today())
+    try:
+        raw = get(url, timeout=20)
+    except Exception:
+        return None
+    from ingestion.rss import _clean_html
+    return _clean_html(raw.decode("utf-8", "replace")[:400_000]) or None
+
+
 def _maybe_ingest_toplines(source: dict, outlet: str, raw_item_id: int, item: dict) -> None:
     """Only after extraction produced a polling-category fact WITH a matched
     race: attempt the conservative topline parse; anything short of two
-    resolved entries is a silent skip."""
+    resolved entries is a silent skip. When the RSS excerpt doesn't yield a
+    resolvable topline, fetch the linked article and retry on its full text —
+    that's where the numbers actually are."""
     fact = db.query_one(
         "SELECT category, race_id FROM extracted_facts WHERE raw_item_id=? ORDER BY id DESC LIMIT 1",
         (raw_item_id,))
     if not fact or fact["category"] != "polling" or not fact["race_id"]:
         return
-    entries = parse_release_toplines(item.get("title") or "", item.get("body") or "")
-    if not entries:
-        return
-    results = _resolve_toplines(fact["race_id"], entries)
+    title = item.get("title") or ""
+    entries = parse_release_toplines(title, item.get("body") or "")
+    results = _resolve_toplines(fact["race_id"], entries) if entries else None
+    if not results:
+        body = _fetch_article_text(item.get("link"))
+        if body:
+            entries = parse_release_toplines(title, body)
+            results = _resolve_toplines(fact["race_id"], entries) if entries else None
     if not results:
         return
     day = _published_date(item.get("published"))
