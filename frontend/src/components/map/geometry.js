@@ -251,7 +251,10 @@ export function themePalette() {
     dem: hexToRgb(get('--dem', '#4d7dd6')),
     rep: hexToRgb(get('--rep', '#cf5b4e')),
     other: hexToRgb(get('--other', '#7fa06a')),
-    neutral: mix(bg, hexToRgb(get('--text', '#e9e4d8')), 0.35),
+    // diverging midpoint: a light theme uses near-WHITE (clean 270towin
+    // blue→white→red) instead of a muddy bg/text gray; dark themes keep a
+    // muted mid-gray that reads against the dark background.
+    neutral: light ? [247, 247, 249] : mix(bg, hexToRgb(get('--text', '#e9e4d8')), 0.35),
     light,
   };
 }

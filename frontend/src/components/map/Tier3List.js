@@ -58,7 +58,7 @@ export class Tier3List {
     table.setAttribute('role', 'grid');
     const thead = document.createElement('thead');
     const tr = document.createElement('tr');
-    for (const [col, label] of [['name', 'State'], ['value', this.modeLabel], ['conf', 'Confidence']]) {
+    for (const [col, label] of [['name', 'State'], ['value', this.modeLabel]]) {
       const th = document.createElement('th');
       th.tabIndex = 0;
       th.textContent = label + (this.sortBy === col ? (this.sortDir > 0 ? ' ▲' : ' ▼') : '');
@@ -80,10 +80,8 @@ export class Tier3List {
       trr.tabIndex = 0;
       trr.dataset.key = s.key;
       const v = this.values?.[s.key];
-      const conf = this.confidence?.[s.key];
       trr.innerHTML = `<td>${s.name}</td>
-        <td class="num">${v === undefined ? '<span class="dim">no data</span>' : this.fmt(v)}</td>
-        <td>${v === undefined ? '' : conf === 'derived' ? '<span class="chip warn">derived</span>' : '<span class="chip ok">measured</span>'}</td>`;
+        <td class="num">${v === undefined ? '<span class="dim">no data</span>' : this.fmt(v)}</td>`;
       const open = () => this.hooks.onPick && this.hooks.onPick({ tier: 'state', key: s.key, name: s.name });
       trr.addEventListener('click', open);
       trr.addEventListener('keydown', (e) => {

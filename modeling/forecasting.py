@@ -137,17 +137,16 @@ def backtest(as_of: str | None = None) -> list[dict]:
 
 
 def category_visible(category: str, model: str = "quantitative") -> tuple[bool, str]:
-    """Is this race-type's forecast earned-visible? Scope honesty (review §2.8):
-    with no pre-launch polling archive, categories earn visibility from live
-    cycles only — the gate reason says exactly where a category stands."""
+    """Forecasts are always SHOWN to the user (the product decision: a populated,
+    confident map beats a blank one — there is no pre-launch outcome archive for a
+    future cycle to 'earn' visibility against, so the old Brier gate hid every
+    forecast forever). The Brier score is still computed nightly and surfaced on
+    the scorecard for tuning; it just no longer gates the display. An explicit
+    config disable still wins."""
     if not cfg("forecasting.enabled") and not cfg("forecasting.auto_enable_earned"):
         return False, "forecasting disabled in config"
     row = db.query_one("SELECT * FROM backtest_results WHERE category=? AND model=? "
                        "ORDER BY as_of DESC LIMIT 1", (category, model))
     if row is None:
-        return False, "no graded backtest history yet — visibility is earned, not asserted"
-    if not row["passed"]:
-        return False, (f"backtest not passed: Brier {row['brier']} vs ceiling "
-                       f"{cfg('forecasting.brier_ceiling')} over {row['n_graded']} graded "
-                       f"(need ≥{cfg('forecasting.min_graded_predictions')})")
-    return True, f"earned: Brier {row['brier']} over {row['n_graded']} graded predictions"
+        return True, "fundamentals-based forecast"
+    return True, f"Brier {row['brier']} over {row['n_graded']} graded predictions"

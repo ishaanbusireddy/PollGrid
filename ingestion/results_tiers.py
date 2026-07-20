@@ -153,7 +153,11 @@ def _parse_openelections_csv(raw: str) -> dict[tuple[str, str], dict[str, int]]:
     county files and precinct files (precinct rows aggregate through the same
     'county' column)."""
     parsed: dict[tuple[str, str], dict[str, int]] = {}
-    for row in csv.DictReader(io.StringIO(raw)):
+    # newline="" is REQUIRED: some OpenElections exports carry lone \r characters
+    # inside fields; without it csv raises "new-line character seen in unquoted
+    # field" and takes the whole source DOWN (it also breaks backfill_president_states,
+    # which reuses this parser). Same pattern as ingestion/cvap.py.
+    for row in csv.DictReader(io.StringIO(raw, newline="")):
         office_key = _OFFICE_MAP.get((row.get("office") or "").replace(".", "").strip().lower())
         if not office_key:
             continue

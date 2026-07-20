@@ -409,7 +409,7 @@ def run(source: dict) -> None:
         raw = get(spec["url"]).decode("utf-8", "replace")
         if spec.get("format", "csv") != "csv":
             continue
-        for row in csv.DictReader(io.StringIO(raw)):
+        for row in csv.DictReader(io.StringIO(raw, newline="")):  # newline="" — tolerate lone \r
             race = db.query_one("SELECT id FROM races WHERE name=?", (row.get(spec.get("race_column", "race"), ""),))
             if not race:
                 continue

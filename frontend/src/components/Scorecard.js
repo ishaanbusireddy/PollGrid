@@ -18,7 +18,7 @@ const COLUMNS = [
   { key: 'model', label: 'Model', num: false },
   { key: 'brier', label: 'Brier', num: true },
   { key: 'n_graded', label: 'Graded', num: true },
-  { key: 'passed', label: 'Gate', num: true },
+  { key: 'passed', label: 'Backtest', num: true },
   { key: 'live', label: 'Live', num: true },
   { key: 'trend', label: 'Trend', num: false, nosort: true },
 ];
@@ -36,7 +36,7 @@ export class Scorecard {
 
   async show() {
     this.el.innerHTML = `<h1>Forecast scorecard</h1>
-      <p class="dim">Nightly Brier backtest against the archive — a race-type only earns a visible forecast after clearing the ceiling over a minimum of graded predictions. Failing categories are shown, not hidden. Click a column header to sort.</p>
+      <p class="dim">Nightly Brier backtest against the archive — lower is better. Every category's forecast is shown live; these scores are for tuning and transparency, not a gate. Click a column header to sort.</p>
       <div class="sc-table"></div>
       <h2 class="mt">Chamber control</h2>
       <div class="sc-chambers row" style="align-items:flex-start"></div>`;

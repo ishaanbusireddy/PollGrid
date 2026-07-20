@@ -100,12 +100,7 @@ out vec4 frag;
 void main(){
   float conf = vColor.a;
   vec3 col = vColor.rgb;
-  float alpha = 0.94;
-  if (conf < 0.3) { alpha = 0.28; }               // no value for this unit
-  else if (conf < 0.8) {                           // 'derived' → hatching
-    float hatch = step(0.55, fract((gl_FragCoord.x + gl_FragCoord.y) / 8.0));
-    col *= mix(0.7, 1.05, hatch);
-  }
+  float alpha = (conf < 0.3) ? 0.28 : 0.94;        // faint when no value, solid otherwise
   float day = clamp(dot(normalize(vObj), uSun) * 1.6 + 0.85, 0.45, 1.0);
   frag = vec4(col * day, alpha);
 }`;
@@ -271,6 +266,7 @@ export class Tier1Globe {
     // camera
     this.cam = { lat: 39, lon: -97.5, zoom: 2.05 };
     this.flight = null;
+    this.targetZoom = null;                  // eased wheel-zoom target (null = settled)
     this._keys = new Set();                  // currently-held nav keys
     this._navRaf = null;                     // rAF handle, live ONLY while a key is held
 
@@ -410,6 +406,7 @@ export class Tier1Globe {
     if (geo) {
       const m = buildLayerMesh(geo.features, 1.0018, 1.0035);
       this.districtMesh = this._uploadLayer(m, geo.features.length);
+      this.applyColors(); // color the fresh mesh now (setCountiesGeo does the same)
     }
   }
   setDistrictsVisible(v) { this.districtsVisible = !!v; }
@@ -470,7 +467,7 @@ export class Tier1Globe {
         const span = (ch.max - ch.min) || 1;
         const t = (ch.values[key] - ch.min) / span;
         rgb = rampColor(ch.rampType === 'diverging' ? 1 - t : t, ch.rampType, pal);
-        conf = ch.confidence && ch.confidence[key] === 'derived' ? 150 : 255;
+        conf = 255; // every value renders solid — no confidence hatching
       }
       data[i * 4] = rgb[0]; data[i * 4 + 1] = rgb[1]; data[i * 4 + 2] = rgb[2]; data[i * 4 + 3] = conf;
     }
@@ -481,6 +478,7 @@ export class Tier1Globe {
   /* ----- camera ----- */
 
   flyTo(lat, lon, zoom, ms = 1100) {
+    this.targetZoom = null; // fly-to owns the camera; drop any pending wheel-zoom
     this.flight = {
       from: { ...this.cam },
       to: { lat, lon: this._nearLon(lon), zoom: zoom ?? this.cam.zoom },
@@ -521,6 +519,7 @@ export class Tier1Globe {
     const c = this.canvas;
     this._drag = null;
     this._onDown = (e) => {
+      this.targetZoom = null; // a drag takes the camera; drop any pending wheel-zoom
       this._drag = { x: e.clientX, y: e.clientY, lat: this.cam.lat, lon: this.cam.lon, moved: false };
       c.setPointerCapture(e.pointerId);
     };
@@ -546,8 +545,11 @@ export class Tier1Globe {
     };
     this._onWheel = (e) => {
       e.preventDefault();
-      const f = Math.exp(-e.deltaY * 0.0012);
-      this.cam.zoom = Math.max(G_ZOOM_MIN, Math.min(G_ZOOM_MAX, this.cam.zoom * f));
+      // set a TARGET zoom eased in _frame; normalize deltaMode across devices
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? (this.canvas.height || 600) : 1;
+      const dy = e.deltaY * unit;
+      const from = this.targetZoom != null ? this.targetZoom : this.cam.zoom;
+      this.targetZoom = Math.max(G_ZOOM_MIN, Math.min(G_ZOOM_MAX, from * Math.exp(-dy * 0.0012)));
       this.flight = null;
     };
     this._onLeave = () => { this._hoverXY = null; this.hooks.onHover && this.hooks.onHover(null); };
@@ -599,7 +601,7 @@ export class Tier1Globe {
     let zf = 0;
     if (has('e') || has('+') || has('=')) zf += 1;
     if (has('q') || has('-') || has('_')) zf -= 1;
-    if (zf) { this.cam.zoom = Math.max(G_ZOOM_MIN, Math.min(G_ZOOM_MAX, this.cam.zoom * Math.exp(zf * 1.6 * dt))); this.flight = null; }
+    if (zf) { this.cam.zoom = Math.max(G_ZOOM_MIN, Math.min(G_ZOOM_MAX, this.cam.zoom * Math.exp(zf * 1.6 * dt))); this.flight = null; this.targetZoom = null; }
     this._navRaf = requestAnimationFrame((t) => this._navFrame(t));
   }
 
@@ -681,6 +683,13 @@ export class Tier1Globe {
       this.cam.lon = f.from.lon + (f.to.lon - f.from.lon) * e;
       this.cam.zoom = f.from.zoom + (f.to.zoom - f.from.zoom) * e;
       if (t >= 1) this.flight = null;
+    }
+    // eased wheel zoom toward targetZoom
+    if (this.targetZoom != null) {
+      let z = this.cam.zoom + (this.targetZoom - this.cam.zoom) * 0.22;
+      if (Math.abs(this.targetZoom - z) < 0.002) z = this.targetZoom;
+      this.cam.zoom = z;
+      if (this.cam.zoom === this.targetZoom) this.targetZoom = null;
     }
     // LOD
     const wantCounties = this.cam.zoom >= COUNTY_LOD_ZOOM;

@@ -73,6 +73,86 @@ body[data-theme="contrast"] {
   --ok: #009e73; --warn: #e69f00; --err: #d55e00; --amber: #e69f00;
 }
 
+/* Midnight — deep navy with a periwinkle accent */
+body[data-theme="midnight"] {
+  --bg: #0b1020;
+  --bg2: #111830;
+  --bg3: #1a2440;
+  --line: #2a3a5f;
+  --text: #e6ecff;
+  --muted: #8695bd;
+  --accent: #6f8cff;
+  --accent-ink: #0b1020;
+  --dem: #5b8def;
+  --rep: #e0625a;
+  --other: #8f7fd0;
+  --ok: #3fbf8f; --warn: #e0b040; --err: #e0564d; --amber: #ffb52e;
+}
+
+/* Carbon — near-black neutral with a warm amber accent */
+body[data-theme="carbon"] {
+  --bg: #0f0f10;
+  --bg2: #171718;
+  --bg3: #202022;
+  --line: #37373a;
+  --text: #ececec;
+  --muted: #9a9a9a;
+  --accent: #e0a341;
+  --accent-ink: #141414;
+  --dem: #5486d6;
+  --rep: #d05a4c;
+  --other: #7fa06a;
+  --ok: #5faf6f; --warn: #d9a441; --err: #d0564d; --amber: #e8b04a;
+}
+
+/* Evergreen — dark forest with a teal accent */
+body[data-theme="evergreen"] {
+  --bg: #0a1512;
+  --bg2: #0f1f1a;
+  --bg3: #16302a;
+  --line: #234a40;
+  --text: #e2f0ea;
+  --muted: #7ea294;
+  --accent: #28c39a;
+  --accent-ink: #04140f;
+  --dem: #4d7dd6;
+  --rep: #cf5b4e;
+  --other: #8bb36a;
+  --ok: #37c88f; --warn: #e0b040; --err: #e0564d; --amber: #ffc96b;
+}
+
+/* Sunset — dark aubergine with an orchid accent */
+body[data-theme="sunset"] {
+  --bg: #140b1a;
+  --bg2: #1e1029;
+  --bg3: #2a1838;
+  --line: #432a56;
+  --text: #f0e6f7;
+  --muted: #a78bbd;
+  --accent: #c874e6;
+  --accent-ink: #140b1a;
+  --dem: #6a86e0;
+  --rep: #e0625a;
+  --other: #c78adf;
+  --ok: #3fbf8f; --warn: #e0b040; --err: #e0564d; --amber: #ffb52e;
+}
+
+/* Oceanic — deep teal-blue with a bright cyan accent */
+body[data-theme="oceanic"] {
+  --bg: #04141c;
+  --bg2: #082431;
+  --bg3: #0d3446;
+  --line: #1b5066;
+  --text: #e0f2fb;
+  --muted: #7fa6bb;
+  --accent: #33c6e8;
+  --accent-ink: #02141a;
+  --dem: #4d9fd6;
+  --rep: #e0685a;
+  --other: #6fc0b0;
+  --ok: #37c88f; --warn: #e0b040; --err: #e0564d; --amber: #ffb52e;
+}
+
 /* ---------------- Base & layout ---------------- */
 
 * { box-sizing: border-box; }

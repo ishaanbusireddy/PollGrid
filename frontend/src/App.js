@@ -59,6 +59,7 @@ const state = {
   socketUp: false,
   statesGeo: null,
   countiesGeo: null,
+  districtsGeo: null,       // cached so buildMap() can re-attach districts on rebuild
   districtsAvailable: false,
   districtActive: false,    // House race-type pins the district overlay + choropleth tier
 };
@@ -340,9 +341,11 @@ async function boot() {
       onHover: (unit, x, y) => showHover(unit, x, y),
       onNeedCounties: () => ensureCounties(),
       onLodChange: (tierName) => {
-        // House mode pins the district tier — don't let the zoom LOD steal it
-        if (state.districtActive) return;
-        state.mapTier = tierName;
+        // House mode: zoomed-out shows districts, zoomed-in shows counties —
+        // counties inherit their dominant district's value via the backend
+        // fan-out, so a House map is never blank at either zoom.
+        if (state.districtActive && tierName === 'state') state.mapTier = 'district';
+        else state.mapTier = tierName;
         loadMapValues();
         updateTierBadge();
       },
@@ -367,6 +370,10 @@ async function boot() {
       return;
     }
     if (state.countiesGeo && map.setCountiesGeo) map.setCountiesGeo(state.countiesGeo);
+    // districts must be re-attached on every rebuild too (was missing — the cause
+    // of the blank House map after a tier switch); restore the overlay if it was on
+    if (state.districtsGeo && map.setDistrictsGeo) map.setDistrictsGeo(state.districtsGeo);
+    if ((state.districtActive || districtsToggleOn()) && map.setDistrictsVisible) map.setDistrictsVisible(true);
   }
 
   function rebuildMap() {
@@ -374,6 +381,11 @@ async function boot() {
     $('#map-root').innerHTML = '';
     map = null;
     buildMap();
+    // a fresh renderer always starts zoomed OUT (showCounties=false) and won't
+    // fire onLodChange on frame 1 — so reconcile mapTier to that zoomed-out state,
+    // else a stale 'county' tier fetches county-keyed values the state layer can't
+    // match and the map paints blank until the user manually re-zooms.
+    state.mapTier = state.districtActive ? 'district' : 'state';
     loadMapValues();
     updateTierBadge();
     if (state.builderActive) builder._paint();
@@ -392,6 +404,7 @@ async function boot() {
   async function probeDistricts() {
     const geo = await api.staticJson('/static/data/us_districts.json');
     state.districtsAvailable = !!geo;
+    state.districtsGeo = geo || null; // cache so buildMap()/rebuildMap() can re-attach
     const t = $('#districts-toggle');
     if (geo) {
       if (map && map.setDistrictsGeo) map.setDistrictsGeo(geo);
@@ -400,8 +413,10 @@ async function boot() {
       t.disabled = true;
       t.title = 'district overlay unavailable — run scripts/build_boundaries.py';
     }
-    // a House race-type chosen before the probe finished still gets its districts
-    if (state.raceType === 'house') applyRaceTypeDistricts();
+    // a House race-type chosen before the probe finished still gets its districts —
+    // and MUST refetch the choropleth (boot's first loadMapValues ran while the tier
+    // was still 'state', so without this the district layer stays uncolored/blank)
+    if (state.raceType === 'house') { applyRaceTypeDistricts(); loadMapValues(); }
   }
 
   function districtsToggleOn() {
@@ -429,7 +444,9 @@ async function boot() {
       if (!priorDistricts) priorDistricts = { visible: districtsToggleOn(), mapTier: state.mapTier };
       state.districtActive = true;
       setDistrictsOverlay(true);
-      state.mapTier = 'district';
+      // choose the tier to match the current zoom: districts when zoomed out,
+      // counties (fanned from the dominant district) when already zoomed in
+      state.mapTier = (map && map.showCounties) ? 'county' : 'district';
       updateTierBadge();
     } else if (!house && priorDistricts) {
       setDistrictsOverlay(priorDistricts.visible);
@@ -531,7 +548,7 @@ async function boot() {
         <span>${l ? escapeHtml(l.label || '') : 'no data'}</span>
         <span>${l ? escapeHtml(m.fmt(m.ramp === 'diverging' ? -Math.max(Math.abs(l.min), Math.abs(l.max)) : l.max)) : '—'}</span>
       </div>
-      <div class="legend-note">${l ? (l.hasDerived ? 'hatched / badged units are <b>derived</b> estimates, not direct measurements' : '') : 'backend offline — map shows boundaries only'}</div>`;
+      <div class="legend-note">${l ? '' : 'backend offline — map shows boundaries only'}</div>`;
   }
 
   /* ----- choropleth ----- */
@@ -572,10 +589,8 @@ async function boot() {
     const m = getMode(state.mode);
     const ch = map.choropleth || {};
     const v = ch.values && ch.tier === unit.tier ? ch.values[unit.key] : undefined;
-    const conf = ch.confidence && ch.confidence[unit.key];
     tip.innerHTML = `<b>${escapeHtml(unit.name || unit.key)}</b><br>
-      <span class="tip-val">${v !== undefined ? m.fmt(v) : 'no data'}</span>
-      ${conf === 'derived' ? ' <span class="chip warn">derived</span>' : ''}`;
+      <span class="tip-val">${v !== undefined ? m.fmt(v) : 'no data'}</span>`;
     tip.style.left = `${Math.min(window.innerWidth - 280, x + 14)}px`;
     tip.style.top = `${y + 14}px`;
   }

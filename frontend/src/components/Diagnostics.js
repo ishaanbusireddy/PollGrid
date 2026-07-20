@@ -32,6 +32,7 @@ export class Diagnostics {
       <p class="dim">Live platform health: the analyst LLM, provenance hash-chains, DB integrity, synthetic data, and every ingestion source.</p>
       <div class="diag-llm"><div class="dim">checking…</div></div>
       <div class="diag-foundation"></div>
+      <div class="panel diag-keys"><div class="panel-head">API keys</div><div class="panel-body"><div class="dim">loading…</div></div></div>
       <div class="row mt" style="align-items:flex-start">
         <div class="panel diag-chains" style="flex:1;min-width:300px;margin:0"><div class="panel-head">Provenance hash-chains</div><div class="panel-body"><div class="dim">loading…</div></div></div>
         <div class="panel diag-integrity" style="flex:1;min-width:300px;margin:0"><div class="panel-head">Integrity checks</div><div class="panel-body"><div class="dim">loading…</div></div></div>
@@ -81,6 +82,20 @@ export class Diagnostics {
           <thead><tr><th>table</th>${tiers.map((t) => `<th>${t.replace('_', ' ')}</th>`).join('')}</tr></thead>
           <tbody>${row('political_history', fd.political_history)}${row('demographics', fd.demographics)}</tbody>
         </table></div></div>`;
+    }
+
+    /* ----- API keys — makes "did my key take effect?" answerable at a glance ----- */
+    const keysBox = this.el.querySelector('.diag-keys .panel-body');
+    if (keysBox && diag && diag.keys && diag.keys.length) {
+      keysBox.innerHTML = diag.keys.map((k) => `
+        <div class="kv"><span class="k">${escapeHtml(k.label)}
+          <span class="dim mono" style="font-size:10px">${escapeHtml(k.name)}</span></span>
+          <span class="v">${k.configured
+            ? `<span class="chip ok">active${k.masked ? ' · ' + escapeHtml(k.masked) : ''}</span>`
+            : '<span class="chip">keyless / fallback</span>'}</span></div>`).join('')
+        + `<div class="dim" style="font-size:10px;margin-top:6px">Keys load from the repo-root <span class="mono">.env</span> at startup (or the Settings tab, applied live). A hand-edited <span class="mono">.env</span> only takes effect after a restart. Sources without a key run on keyless/DEMO fallbacks — the map and demographics don't need any key.</div>`;
+    } else if (keysBox) {
+      keysBox.innerHTML = `<div class="empty">Key status unavailable.<span class="why">GET /api/diagnostics failed</span></div>`;
     }
 
     /* ----- hash-chain table ----- */

@@ -54,12 +54,14 @@ def config_mirror(req):
 def diagnostics(req):
     from analyst.llm import current_provider
     from core.db import DB_PATH, run_integrity_checks
+    from core import keys
     synth = sum(db.query_one(f"SELECT COUNT(*) c FROM {t} WHERE is_synthetic=1")["c"]
                 for t in ("polls", "raw_items", "extracted_facts", "demographics", "races",
                           "results_live", "stories", "political_history"))
     return {"llm": current_provider(),
             "chains": [{"table": t, "ok": ok, "detail": d} for t, ok, d in provenance.verify_all()],
-            "integrity": run_integrity_checks(), "db_path": DB_PATH, "synthetic_rows": synth}
+            "integrity": run_integrity_checks(), "db_path": DB_PATH, "synthetic_rows": synth,
+            "keys": keys.status()}
 
 
 # ------------------------------ geography ------------------------------
@@ -731,36 +733,43 @@ def map_values(req):
                     c = _lean_conf({"state_fips": fips, "district_version_id": None})
                     if c:
                         confidence[fips] = c
-        if tier == "county" and values and any(len(k) > 2 for k in values):
-            # HOUSE at county zoom: values are DISTRICT-geoid-keyed, so the state
-            # fan-out below can never match (pre-v4.1 this painted uniform no-data).
-            # Fan each county to its DOMINANT district via the persisted
-            # county<->district area-share table instead — each county takes the
-            # value of the district covering most of its area.
-            fanned, fanned_conf = {}, {}
-            for row in db.query(
-                    "SELECT county_geoid, district_geoid, MAX(share) FROM county_district_area_shares "
-                    "GROUP BY county_geoid"):
-                v = values.get(row["district_geoid"])
-                if v is None:
-                    continue
-                fanned[row["county_geoid"]] = v
-                if row["district_geoid"] in confidence:
-                    fanned_conf[row["county_geoid"]] = confidence[row["district_geoid"]]
-            values, confidence = fanned, fanned_conf
-        elif tier == "county" and values:
-            # statewide race-typed values are keyed by 2-digit state_fips, but the
-            # county LOD draws 5-digit county geoids — fan each state's value onto all
-            # its counties so the county layer recolors instead of painting uniform no-data
+        if tier == "county" and values:
             by_state: dict[str, list[str]] = {}
             for c in db.query("SELECT geoid, state_fips FROM county_equivalents"):
                 by_state.setdefault(c["state_fips"], []).append(c["geoid"])
             fanned, fanned_conf = {}, {}
-            for sf, v in values.items():
-                for geoid in by_state.get(sf, []):
-                    fanned[geoid] = v
-                    if sf in confidence:
-                        fanned_conf[geoid] = confidence[sf]
+            if any(len(k) > 2 for k in values):
+                # HOUSE at county zoom: values are DISTRICT-geoid-keyed. Fan each
+                # county to its DOMINANT covering district via the persisted
+                # area-share table — each county takes the value of the district
+                # covering most of its area.
+                for row in db.query(
+                        "SELECT county_geoid, district_geoid, MAX(share) FROM county_district_area_shares "
+                        "GROUP BY county_geoid"):
+                    v = values.get(row["district_geoid"])
+                    if v is None:
+                        continue
+                    fanned[row["county_geoid"]] = v
+                    if row["district_geoid"] in confidence:
+                        fanned_conf[row["county_geoid"]] = confidence[row["district_geoid"]]
+                if mode == "partisan_lean":
+                    # fill any county the area-share fan didn't cover (partial or empty
+                    # share table) with its STATE lean, so the House county map is
+                    # never blank; counties WITH real per-district shares keep them.
+                    for fips in by_state:
+                        lean = partisan_lean({"state_fips": fips, "district_version_id": None})
+                        if not lean:
+                            continue
+                        for geoid in by_state[fips]:
+                            fanned.setdefault(geoid, lean)
+            else:
+                # statewide race-typed values keyed by 2-digit state_fips → fan onto
+                # every county so the county layer recolors instead of painting no-data
+                for sf, v in values.items():
+                    for geoid in by_state.get(sf, []):
+                        fanned[geoid] = v
+                        if sf in confidence:
+                            fanned_conf[geoid] = confidence[sf]
             values, confidence = fanned, fanned_conf
     elif mode == "volatility":
         for r in db.query("SELECT DISTINCT race_id FROM poll_averages"):

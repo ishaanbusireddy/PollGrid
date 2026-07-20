@@ -14,23 +14,41 @@ from modeling.audit import record
 def partisan_lean(race: dict) -> float:
     """PVI-style: mean Dem-minus-Rep margin over the entity's last two
     presidential results, relative to the national margin. Deterministic,
-    from political_history — never LLM-guessed."""
-    tier, entity = ("state", race["state_fips"]) if race["state_fips"] else ("nation", "US")
-    if race["district_version_id"]:
-        tier, entity = "congressional_district", str(race["district_version_id"])
-    rows = db.query(
-        "SELECT dem_pct, rep_pct, cycle_year FROM political_history "
-        "WHERE tier=? AND entity_id=? AND office='president' AND dem_pct IS NOT NULL "
-        "ORDER BY cycle_year DESC LIMIT 2", (tier, entity))
+    from political_history — never LLM-guessed.
+
+    A congressional district falls back to its STATE's lean when it has no
+    district-level presidential history yet (real district leans, derived by
+    areal interpolation from county results, supersede the fallback wherever
+    county data has landed). This keeps EVERY district colored instead of
+    painting the ~2/3 without derived data a dead neutral."""
     nat = db.query(
         "SELECT dem_pct, rep_pct, cycle_year FROM political_history "
         "WHERE tier='nation' AND entity_id='US' AND office='president' AND dem_pct IS NOT NULL "
         "ORDER BY cycle_year DESC LIMIT 2")
-    if not rows or not nat:
+    if not nat:
         return 0.0
-    ent = sum(r["dem_pct"] - r["rep_pct"] for r in rows) / len(rows)
     natm = sum(r["dem_pct"] - r["rep_pct"] for r in nat) / len(nat)
-    return round(ent - natm, 2)
+
+    def _lean(tier: str, entity: str) -> float | None:
+        rows = db.query(
+            "SELECT dem_pct, rep_pct FROM political_history "
+            "WHERE tier=? AND entity_id=? AND office='president' AND dem_pct IS NOT NULL "
+            "ORDER BY cycle_year DESC LIMIT 2", (tier, entity))
+        if not rows:
+            return None
+        ent = sum(r["dem_pct"] - r["rep_pct"] for r in rows) / len(rows)
+        return round(ent - natm, 2)
+
+    if race["district_version_id"]:
+        lean = _lean("congressional_district", str(race["district_version_id"]))
+        if lean is None and race["state_fips"]:
+            lean = _lean("state", race["state_fips"])  # fallback: inherit the state lean
+        return lean if lean is not None else 0.0
+    if race["state_fips"]:
+        lean = _lean("state", race["state_fips"])
+        return lean if lean is not None else 0.0
+    lean = _lean("nation", "US")
+    return lean if lean is not None else 0.0
 
 
 def _generic_ballot(as_of: str) -> float:

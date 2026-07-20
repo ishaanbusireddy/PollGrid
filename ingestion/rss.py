@@ -33,6 +33,18 @@ def _repair_xml(raw: bytes) -> bytes:
 _ITEM_BLOCK_RE = re.compile(r"<(item|entry)\b[^>]*>(.*?)</\1>", re.IGNORECASE | re.DOTALL)
 _CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
+# RSS 1.0 content module: WordPress/pollster feeds put the FULL post body (where
+# horse-race toplines actually live) in <content:encoded>, not the teaser
+# <description>. Reading it is what lets the deterministic topline parser see the
+# numbers at all.
+_CONTENT_NS = "{http://purl.org/rss/1.0/modules/content/}encoded"
+
+
+def _clean_html(s: str) -> str:
+    """Strip tags + unescape entities + collapse whitespace — content:encoded is
+    real HTML, and the topline regex wants plain text. Matches what the tolerant
+    parser already does, so strict and fallback paths yield the same shape."""
+    return re.sub(r"\s+", " ", html.unescape(_TAG_RE.sub(" ", s or ""))).strip()
 
 
 def _text_field(block: str, *tag_names: str) -> str:
@@ -88,21 +100,24 @@ def parse_feed(raw: bytes) -> list[dict]:
             return _parse_feed_tolerant(raw)
     items = []
     for it in root.iter("item"):  # RSS 2.0
+        # prefer content:encoded (full body) over description (teaser)
+        body = it.findtext(_CONTENT_NS) or it.findtext("description") or ""
         items.append({
             "id": (it.findtext("guid") or it.findtext("link") or it.findtext("title") or "").strip(),
             "title": (it.findtext("title") or "").strip(),
             "link": (it.findtext("link") or "").strip(),
-            "body": (it.findtext("description") or "").strip(),
+            "body": _clean_html(body),
             "published": (it.findtext("pubDate") or "").strip(),
         })
     if not items:
-        for e in root.iter(f"{_ATOM}entry"):  # Atom
+        for e in root.iter(f"{_ATOM}entry"):  # Atom — content is fuller than summary
             link = e.find(f"{_ATOM}link")
+            body = e.findtext(f"{_ATOM}content") or e.findtext(f"{_ATOM}summary") or ""
             items.append({
                 "id": (e.findtext(f"{_ATOM}id") or "").strip(),
                 "title": (e.findtext(f"{_ATOM}title") or "").strip(),
                 "link": link.get("href", "") if link is not None else "",
-                "body": (e.findtext(f"{_ATOM}summary") or e.findtext(f"{_ATOM}content") or "").strip(),
+                "body": _clean_html(body),
                 "published": (e.findtext(f"{_ATOM}updated") or "").strip(),
             })
     return items

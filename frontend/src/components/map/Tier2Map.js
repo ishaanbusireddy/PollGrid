@@ -43,6 +43,8 @@ export class Tier2Map {
 
     this.view = { x: REF_W / 2, y: REF_H / 2, k: 1 }; // pan/zoom in reference coords
     this.flight = null;
+    this.targetK = null;                     // eased wheel-zoom target (null = settled)
+    this._zoomAnchor = null;                  // {sx,sy} device-px cursor the zoom pivots on
     this._keys = new Set();                  // currently-held nav keys
     this._navRaf = null;                     // rAF handle, live ONLY while a key is held
     this.threads = [];                       // 2D animated arcs
@@ -87,19 +89,12 @@ export class Tier2Map {
   setPins(pins) { this.pinsData = pins; }
   refreshTheme() {
     this.palette = themePalette();
-    // hatch pattern for 'derived' confidence
-    const pc = document.createElement('canvas');
-    pc.width = pc.height = 6;
-    const px = pc.getContext('2d');
-    px.strokeStyle = 'rgba(0,0,0,0.35)';
-    px.lineWidth = 1.4;
-    px.beginPath(); px.moveTo(-1, 7); px.lineTo(7, -1); px.stroke();
-    this.hatch = this.ctx.createPattern(pc, 'repeat');
   }
 
   /* ----- camera ----- */
 
   flyTo(lat, lon, zoom, ms = 800) {
+    this.targetK = null; // fly-to owns the camera; drop any pending wheel-zoom
     const [x, y] = this.project(lon, lat);
     this.flight = { from: { ...this.view }, to: { x, y, k: zoom || this.view.k }, t0: performance.now(), dur: ms };
   }
@@ -111,6 +106,7 @@ export class Tier2Map {
     if (i < 0) return;
     const [minX, minY, maxX, maxY] = layer.bbox[i];
     const k = Math.min(18, Math.max(1, 0.75 * Math.min(REF_W / (maxX - minX + 1), REF_H / (maxY - minY + 1))));
+    this.targetK = null; // fly-to owns the camera; drop any pending wheel-zoom
     this.flight = {
       from: { ...this.view },
       to: { x: (minX + maxX) / 2, y: (minY + maxY) / 2, k },
@@ -157,7 +153,7 @@ export class Tier2Map {
   _bindEvents() {
     const c = this.canvas;
     this._drag = null;
-    this._onDown = (e) => { this._drag = { x: e.clientX, y: e.clientY, vx: this.view.x || REF_W / 2, vy: this.view.y || REF_H / 2, moved: false }; c.setPointerCapture(e.pointerId); };
+    this._onDown = (e) => { this.targetK = null; this._drag = { x: e.clientX, y: e.clientY, vx: this.view.x || REF_W / 2, vy: this.view.y || REF_H / 2, moved: false }; c.setPointerCapture(e.pointerId); };
     this._onMove = (e) => {
       if (this._drag && (e.buttons & 1)) {
         const rect = c.getBoundingClientRect();
@@ -176,26 +172,19 @@ export class Tier2Map {
       this._drag = null;
       if (!moved) this.hooks.onPick && this.hooks.onPick(this.pick(e.clientX, e.clientY), e);
     };
-    // smooth wheel zoom, anchored to the cursor: the geographic point under the
-    // pointer stays under the pointer (≈0.18 per notch).
+    // smooth wheel zoom, anchored to the cursor: set a TARGET zoom and let _frame
+    // ease view.k toward it (the geographic point under the pointer stays put the
+    // whole animation, not just at the end). deltaMode is normalized so a mouse
+    // wheel (lines/pages) and a trackpad (pixels) feel the same.
     this._onWheel = (e) => {
       e.preventDefault();
       const rect = c.getBoundingClientRect();
       const dpr = this.canvas.width / (rect.width || 1);
-      const sx = (e.clientX - rect.left) * dpr;
-      const sy = (e.clientY - rect.top) * dpr;
-      const w = this.canvas.width, h = this.canvas.height;
-      const base = Math.min(w / REF_W, h / REF_H);
-      const kOld = base * this.view.k;
-      const newViewK = Math.max(K_MIN, Math.min(K_MAX, this.view.k * Math.exp(-e.deltaY * 0.0018)));
-      const kNew = base * newViewK;
-      if (kNew !== kOld) {
-        // keep ref point under cursor fixed: cx' = cx + (s - center)*(1/kOld - 1/kNew)
-        this.view.x += (sx - w / 2) * (1 / kOld - 1 / kNew);
-        this.view.y += (sy - h / 2) * (1 / kOld - 1 / kNew);
-        this.view.k = newViewK;
-      }
-      this._clampView();
+      this._zoomAnchor = { sx: (e.clientX - rect.left) * dpr, sy: (e.clientY - rect.top) * dpr };
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? (this.canvas.height || REF_H) : 1;
+      const dy = e.deltaY * unit;
+      const from = this.targetK != null ? this.targetK : this.view.k;
+      this.targetK = Math.max(K_MIN, Math.min(K_MAX, from * Math.exp(-dy * 0.0018)));
       this.flight = null;
     };
     this._onLeave = () => { this._hoverXY = null; this.hooks.onHover && this.hooks.onHover(null); };
@@ -264,7 +253,7 @@ export class Tier2Map {
     let zf = 0;
     if (has('e') || has('+') || has('=')) zf += 1;
     if (has('q') || has('-') || has('_')) zf -= 1;
-    if (zf) { this.view.k *= Math.exp(zf * 1.6 * dt); this.flight = null; }
+    if (zf) { this.view.k *= Math.exp(zf * 1.6 * dt); this.flight = null; this.targetK = null; }
     this._clampView();
     this._navRaf = requestAnimationFrame((t) => this._navFrame(t));
   }
@@ -307,6 +296,23 @@ export class Tier2Map {
       this.view.k = f.from.k + (f.to.k - f.from.k) * e;
       if (t >= 1) this.flight = null;
     }
+    // eased wheel zoom toward targetK, keeping the cursor anchor fixed each step
+    if (this.targetK != null) {
+      const k0 = this.view.k;
+      let k1 = k0 + (this.targetK - k0) * 0.22;
+      if (Math.abs(this.targetK - k1) < 0.001) k1 = this.targetK;
+      if (k1 !== k0) {
+        const w = this.canvas.width, h = this.canvas.height;
+        const base = Math.min(w / REF_W, h / REF_H);
+        const kOldPx = base * k0, kNewPx = base * k1;
+        const a = this._zoomAnchor || { sx: w / 2, sy: h / 2 };
+        this.view.x += (a.sx - w / 2) * (1 / kOldPx - 1 / kNewPx);
+        this.view.y += (a.sy - h / 2) * (1 / kOldPx - 1 / kNewPx);
+        this.view.k = k1;
+        this._clampView();
+      }
+      if (this.view.k === this.targetK) { this.targetK = null; this._zoomAnchor = null; }
+    }
     const wantCounties = this.view.k >= COUNTY_LOD_SCALE;
     if (wantCounties && !this.countiesRequested) {
       this.countiesRequested = true;
@@ -337,10 +343,9 @@ export class Tier2Map {
 
     const drawLayer = (layer, tierName, strokeCss, lw) => {
       for (let i = 0; i < layer.features.length; i++) {
-        const { css, conf } = this._colorFor(tierName, layer.features[i].id);
+        const { css } = this._colorFor(tierName, layer.features[i].id);
         ctx.fillStyle = css;
         ctx.fill(layer.paths[i]);
-        if (conf === 'derived' && this.hatch) { ctx.fillStyle = this.hatch; ctx.fill(layer.paths[i]); }
         ctx.strokeStyle = strokeCss;
         ctx.lineWidth = lw / k;
         ctx.stroke(layer.paths[i]);

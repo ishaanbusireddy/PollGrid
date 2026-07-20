@@ -162,6 +162,17 @@ def bootstrap(start_ingestion: bool = False) -> None:
     from ingestion import sources_seed
     sources_seed.seed()
 
+    # Loudly report which API keys the .env/env actually delivered — the fix for
+    # "I added a key and nothing happened": you can now SEE it was picked up (a
+    # hand-edited .env only takes effect on restart, which this print confirms).
+    from core import keys as _keys
+    _active = [k["name"] for k in _keys.status() if k["configured"]]
+    if _active:
+        print(f"API keys active: {', '.join(_active)}")
+    else:
+        print("API keys active: none — all sources run on keyless/DEMO_KEY fallbacks "
+              "(add keys in the Settings tab or repo-root .env, then restart)")
+
     checks = geography.phase_a_checks()
     if not checks["ok"]:
         print(f"WARNING: Phase-A checks not clean: {checks}")

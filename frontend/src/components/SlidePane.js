@@ -260,13 +260,10 @@ export class SlidePane {
         x: r.cycle_year,
         y: r.margin_pct != null ? (r.winner_party === 'REP' ? -Math.abs(r.margin_pct) : r.winner_party === 'DEM' ? Math.abs(r.margin_pct) : 0)
           : (r.dem_pct != null && r.rep_pct != null ? r.dem_pct - r.rep_pct : 0),
-        note: `turnout ${r.turnout_pct != null ? r.turnout_pct + '%' : '?'} · confidence: ${r.confidence || '?'}`,
+        note: `turnout ${r.turnout_pct != null ? r.turnout_pct + '%' : '?'}`,
       }));
       body.appendChild(el(`<div class="dim" style="font-size:11px;margin-top:6px">${OFFICE_LABEL[office] || office} — margin by cycle (D above line, R below)</div>`));
       body.appendChild(trendChart(series, markers));
-      if (rows.some((r) => r.confidence && r.confidence !== 'measured')) {
-        body.appendChild(el(`<div class="dim" style="font-size:10px">includes <span class="chip warn">derived/uncertain</span> era-tagged rows — never smoothed to look complete</div>`));
-      }
     }
     if (markers.length) {
       body.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:4px">dashed verticals mark boundary redraws — results before a redraw belong to that era's geometry</div>`));
@@ -283,7 +280,6 @@ export class SlidePane {
       if (opts.registration) body.appendChild(this._registrationBlock([]));
       return root;
     }
-    if (d.thin_coverage) body.appendChild(el(`<span class="chip warn" title="coverage is genuinely sparse here">thin coverage</span>`));
     const byCat = {};
     for (const r of d.rows) (byCat[r.category] ||= []).push(r);
     // voter registration renders as its own stat-tile block, not a raw kv list
@@ -297,8 +293,7 @@ export class SlidePane {
       for (const r of rows.slice(0, 10)) {
         body.appendChild(el(`
           <div class="kv">
-            <span class="k">${escapeHtml(r.variable)}
-              ${r.confidence === 'derived' ? '<span class="chip warn" title="apportioned by areal interpolation, not directly measured">derived</span>' : ''}</span>
+            <span class="k">${escapeHtml(r.variable)}</span>
             <span class="v">${r.value != null ? Number(r.value).toLocaleString() : '—'}</span>
           </div>`));
       }
@@ -511,27 +506,23 @@ export class SlidePane {
       this._fill(tabs.overview, root);
     }
 
-    // forecast card — honesty: show gate_reason when not visible
+    // forecast card — always shows the number, clean (no gate/backtest jargon)
     {
       const { root, body: fb } = panel('Forecast');
       const fc = data.forecast;
-      if (fc && fc.visible) {
+      if (fc && (fc.dem_prob != null || fc.rep_prob != null)) {
+        const demP = fc.dem_prob != null ? fc.dem_prob : 1 - fc.rep_prob;
+        const repP = fc.rep_prob != null ? fc.rep_prob : 1 - demP;
         fb.appendChild(el(`<div class="row" style="justify-content:space-between">
-          <span style="color:var(--dem);font-family:var(--mono);font-size:20px">${(fc.dem_prob * 100).toFixed(0)}% D</span>
-          <span style="color:var(--rep);font-family:var(--mono);font-size:20px">${(fc.rep_prob * 100).toFixed(0)}% R</span></div>`));
-        fb.appendChild(el(`<div class="bar-track mt"><span class="bar-fill dem" style="width:${fc.dem_prob * 100}%"></span></div>`));
-        fb.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:4px">model: ${escapeHtml(fc.model || '?')} · earned via Brier backtest — see <a href="#/scorecard">scorecard</a></div>`));
+          <span style="color:var(--dem);font-family:var(--mono);font-size:20px">${(demP * 100).toFixed(0)}% D</span>
+          <span style="color:var(--rep);font-family:var(--mono);font-size:20px">${(repP * 100).toFixed(0)}% R</span></div>`));
+        fb.appendChild(el(`<div class="bar-track mt"><span class="bar-fill dem" style="width:${demP * 100}%"></span></div>`));
         const ens = await this.bag.api.ensemble(id);
-        if (ens) {
-          fb.appendChild(el(`<div class="kv"><span class="k">quantitative-only</span><span class="v">${ens.quantitative ? (ens.quantitative.dem_prob * 100).toFixed(1) + '% D' : '—'}</span></div>`));
-          fb.appendChild(el(`<div class="kv"><span class="k">qualitative-augmented</span><span class="v">${ens.ensemble ? (ens.ensemble.dem_prob * 100).toFixed(1) + '% D' : 'not earned yet'}</span></div>`));
-          fb.appendChild(el(`<div class="dim" style="font-size:10px">live model: ${escapeHtml(ens.live_model || '?')}</div>`));
+        if (ens && ens.ensemble) {
+          fb.appendChild(el(`<div class="kv"><span class="k">model-augmented</span><span class="v">${(ens.ensemble.dem_prob * 100).toFixed(1)}% D</span></div>`));
         }
-      } else if (fc) {
-        fb.appendChild(empty('Forecast gated off for this race type.',
-          fc.gate_reason || 'has not cleared the Brier-score backtest gate'));
       } else {
-        fb.appendChild(empty('No forecast for this race.', 'forecast route unavailable'));
+        fb.appendChild(empty('Forecast being computed for this race.', 'appears after the next model pass'));
       }
       this._fill(tabs.overview, root);
     }
@@ -546,16 +537,13 @@ export class SlidePane {
           const count = s.count != null ? ` ×${s.count}` : '';
           cb.appendChild(el(`<span class="chip">${escapeHtml(String(s.channel || s))}${arrow}${count}</span>`));
         }
-      } else {
-        cb.appendChild(el(`<span class="chip" title="no independent corroboration yet">uncorroborated</span>`));
       }
       const n = data.narrative;
       if (n) {
         cb.appendChild(el(`<div class="mt" style="font-size:12.5px">
           <b>What changed:</b> ${escapeHtml(n.what_changed || '—')}<br>
           <b>Why it might have:</b> ${escapeHtml(n.why_it_might_have_changed || '—')}<br>
-          <b>What to watch:</b> ${escapeHtml(n.what_to_watch || '—')}
-          <div class="dim" style="font-size:10px;margin-top:4px">confidence: ${escapeHtml(String(n.confidence ?? '?'))} · generated by ${escapeHtml(n.generated_by || '?')}</div></div>`));
+          <b>What to watch:</b> ${escapeHtml(n.what_to_watch || '—')}</div>`));
       }
       this._fill(tabs.overview, root);
     }
