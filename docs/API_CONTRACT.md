@@ -22,7 +22,9 @@ frontend must degrade to "district overlay unavailable").
 - `GET /api/entities/{tier}/{id}/history` → `{rows:[{office,seat,cycle_year,winner_party,dem_pct,rep_pct,margin_pct,turnout_pct,confidence}], boundary_events:[{congress_number,effective_from,note}]}`
 
 ## Races
-- `GET /api/races?cycle=2026&type=senate&state=30&status=live&competitive=1` → `[{id,name,race_type,phase,cycle_year,state_fips,district_number,seat,status,competitiveness,leader_party,leader_margin}]` (all filters optional)
+- `GET /api/races?cycle=2026&type=senate&state=30&status=live&competitive=1&phase=general` → `[{id,name,race_type,phase,cycle_year,state_fips,district_number,seat,status,competitiveness,election_date,leader_party,leader_margin}]` (all filters optional; `phase` defaults to `general`, accepts `primary`/`runoff`/`all` — v4.3 addition)
+- `GET /api/elections?state=06` → `{as_of, entries:[{date,kind,states:[{fips,usps,name}]}], races?:[...]}` — the 2026 calendar (primaries + general), chronological; `state` narrows and adds that state's dated races (v4.3 addition)
+- `GET /api/officeholders/{state_fips}` → `{state_fips, governor:{candidate_id,name,party_code,portrait_url,start_date}|null, senators:[...], house:[{district_number,...}]}` — current officeholders, person-level (v4.3 addition)
 - `GET /api/races/{id}` → `{race, candidates:[{id,name,party_code,is_incumbent,ideology_score}], average:{as_of,parties:{DEM:48.1,...},n_polls}, fundamentals:{as_of,dem_score,components}, forecast:{model,dem_prob,rep_prob,visible:bool,gate_reason}, narrative:{what_changed,why_it_might_have_changed,what_to_watch,confidence,generated_by}, corroboration:{badge:bool,signals:[...]}, volatility:{score,as_of}}`
 - `GET /api/races/{id}/framing` → `{matrix:[{outlet,leaning,topic,framing}], ad_spend:[{sponsor,medium,amount}]}`
 - `GET /api/factors/{race_id}` → `{factors:[{key,name,family,method,score,rationale,citations:[fact_id]}], as_of}`

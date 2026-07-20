@@ -23,7 +23,7 @@ export function gradeChip(grade) {
 function fmtResults(obj) {
   if (!obj) return '<span class="dim">—</span>';
   return Object.entries(obj)
-    .map(([p, v]) => `<span class="chip ${p === 'DEM' ? 'dem' : p === 'REP' ? 'rep' : 'other'}">${escapeHtml(p)} ${Number(v).toFixed(1)}</span>`)
+    .map(([p, v]) => `<span class="chip ${({ DEM: 'dem', REP: 'rep', GRN: 'grn', LIB: 'lib', IND: 'ind' })[p] || 'other'}">${escapeHtml(p)} ${Number(v).toFixed(1)}</span>`)
     .join(' ');
 }
 

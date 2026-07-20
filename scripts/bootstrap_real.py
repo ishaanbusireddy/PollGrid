@@ -205,7 +205,7 @@ def _run_fast_pipeline() -> None:
         ("competitiveness_classified", fundamentals.classify_all_competitiveness),
         ("poll_averages", averaging.run_all),
         ("forecasts", lambda: sum(1 for r in db.query(
-            "SELECT id FROM races WHERE race_type != 'generic_ballot' LIMIT 600")
+            "SELECT id FROM races WHERE race_type != 'generic_ballot' AND phase='general' LIMIT 600")
             if forecasting.compute(r["id"]))),
         ("coalitions", lambda: sum(1 for r in db.query(
             "SELECT DISTINCT id FROM races WHERE competitiveness IN ('tossup','lean')")

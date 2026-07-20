@@ -159,6 +159,11 @@ def bootstrap(start_ingestion: bool = False) -> None:
     from scripts.seed_state_presidentials import run as seed_state_history
     seed_national_history()
     seed_state_history()
+    # current officeholders (50 governors + 100 senators, hand-transcribed) and
+    # the 2026 election calendar — zero-network; the Congress.gov member sync
+    # refreshes the roster + adds all 435 House reps once its key is present
+    from scripts.seed_officeholders import run as seed_officeholders
+    seed_officeholders()
     from ingestion import sources_seed
     sources_seed.seed()
 

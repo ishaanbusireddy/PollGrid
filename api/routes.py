@@ -169,11 +169,62 @@ def races(req):
         if req.query.get(key):
             clauses.append(f"{col}=?")
             params.append(req.query[key])
+    # phase defaults to 'general' so pre-primary UIs keep their behavior;
+    # ?phase=primary selects primaries, ?phase=all mixes everything
+    phase = req.query.get("phase", "general")
+    if phase != "all":
+        clauses.append("phase=?")
+        params.append(phase)
     if req.query.get("competitive"):
         clauses.append("competitiveness IN ('tossup','lean')")
-    rows = db.query(f"SELECT * FROM races WHERE {' AND '.join(clauses)} ORDER BY race_type, name LIMIT 700",
+    rows = db.query(f"SELECT * FROM races WHERE {' AND '.join(clauses)} ORDER BY race_type, name LIMIT 1600",
                     params)
     return [_race_row(r) for r in rows]
+
+
+@route("GET", "/api/elections")
+def elections(req):
+    """The 2026 elections calendar: every primary/general date with the states
+    holding it, chronological. ?state=<fips> narrows to one state and includes
+    that state's dated races (primary + general)."""
+    st = req.query.get("state")
+    where, params = ("AND ec.state_fips=?", (st,)) if st else ("", ())
+    cal = db.query(
+        f"""SELECT ec.state_fips, ec.cycle_year, ec.kind, ec.election_date, s.usps_code, s.name
+            FROM election_calendar ec JOIN states s ON s.fips_code = ec.state_fips
+            WHERE 1=1 {where} ORDER BY ec.election_date, s.name""", params)
+    entries: dict[tuple[str, str], dict] = {}
+    for r in cal:
+        e = entries.setdefault((r["election_date"], r["kind"]), {
+            "date": r["election_date"], "kind": r["kind"], "states": []})
+        e["states"].append({"fips": r["state_fips"], "usps": r["usps_code"], "name": r["name"]})
+    out = {"as_of": today(), "entries": sorted(entries.values(), key=lambda e: (e["date"], e["kind"]))}
+    if st:
+        out["races"] = db.query(
+            "SELECT id, name, race_type, phase, seat, election_date, status, competitiveness "
+            "FROM races WHERE state_fips=? AND cycle_year=2026 ORDER BY election_date, race_type", (st,))
+    return out
+
+
+@route("GET", "/api/officeholders/{state_fips}")
+def officeholders(req, state_fips):
+    """Current officeholders for one state: governor, both senators, and every
+    House rep (district-keyed). Person-level, from the seeded/synced roster."""
+    rows = db.query(
+        """SELECT o.office, o.district_number, o.start_date, c.id candidate_id, c.name,
+                  c.party_code, c.portrait_url
+           FROM officeholders o JOIN candidates c ON c.id = o.candidate_id
+           WHERE o.state_fips=? AND o.end_date IS NULL
+           ORDER BY o.office, o.district_number""", (state_fips,))
+    out = {"state_fips": state_fips, "governor": None, "senators": [], "house": []}
+    for r in rows:
+        if r["office"] == "governor":
+            out["governor"] = r
+        elif r["office"] == "senate":
+            out["senators"].append(r)
+        elif r["office"] == "house":
+            out["house"].append(r)
+    return out
 
 
 @route("GET", "/api/races/{id}")

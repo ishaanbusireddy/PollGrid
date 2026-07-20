@@ -22,6 +22,7 @@ import { TimeScrubber } from './components/TimeScrubber.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { SoundEngine } from './components/SoundEngine.js';
 import { Scorecard } from './components/Scorecard.js';
+import { Elections } from './components/Elections.js';
 import { Lobbies } from './components/Lobbies.js';
 import { Diagnostics } from './components/Diagnostics.js';
 import { Settings } from './components/Settings.js';
@@ -164,6 +165,7 @@ async function boot() {
   const feed = new Feed($('#feed'), bag);
   const pollsWindow = new PollsWindow($('#view-root'), bag);
   const scorecard = new Scorecard($('#view-root'), bag);
+  const elections = new Elections($('#view-root'), bag);
   const lobbies = new Lobbies($('#view-root'), bag);
   const diagnostics = new Diagnostics($('#view-root'), bag);
   const settings = new Settings($('#view-root'), bag);
@@ -336,6 +338,13 @@ async function boot() {
       onPick: (unit) => {
         if (!unit) return;
         if (state.builderActive) { builder.handlePick(unit); return; }
+        if (unit.tier === 'district') {
+          // the map keys districts by GEOID; the district page wants the
+          // district_version_id — translate via the probe-time lookup
+          const dvid = state.dvidByGeoid && state.dvidByGeoid[unit.key];
+          navigate(dvid ? `#/district/${dvid}` : `#/state/${unit.key.slice(0, 2)}`);
+          return;
+        }
         navigate(unit.tier === 'county' ? `#/county/${unit.key}` : `#/state/${unit.key}`);
       },
       onHover: (unit, x, y) => showHover(unit, x, y),
@@ -405,6 +414,11 @@ async function boot() {
     const geo = await api.staticJson('/static/data/us_districts.json');
     state.districtsAvailable = !!geo;
     state.districtsGeo = geo || null; // cache so buildMap()/rebuildMap() can re-attach
+    // GEOID -> district_version_id, so clicking a district can open its page
+    api.geoDistricts().then((rows) => {
+      state.dvidByGeoid = {};
+      for (const d of rows || []) state.dvidByGeoid[d.geoid] = d.district_version_id;
+    });
     const t = $('#districts-toggle');
     if (geo) {
       if (map && map.setDistrictsGeo) map.setDistrictsGeo(geo);
@@ -589,7 +603,13 @@ async function boot() {
     const m = getMode(state.mode);
     const ch = map.choropleth || {};
     const v = ch.values && ch.tier === unit.tier ? ch.values[unit.key] : undefined;
-    tip.innerHTML = `<b>${escapeHtml(unit.name || unit.key)}</b><br>
+    let label = unit.name || unit.key;
+    if (unit.tier === 'district' && !unit.name) {
+      const sn = statesByFips[String(unit.key).slice(0, 2)]?.name || String(unit.key).slice(0, 2);
+      const dn = Number(String(unit.key).slice(2));
+      label = `${sn} ${dn === 0 ? 'At-large' : 'District ' + dn}`;
+    }
+    tip.innerHTML = `<b>${escapeHtml(label)}</b><br>
       <span class="tip-val">${v !== undefined ? m.fmt(v) : 'no data'}</span>`;
     tip.style.left = `${Math.min(window.innerWidth - 280, x + 14)}px`;
     tip.style.top = `${y + 14}px`;
@@ -603,6 +623,7 @@ async function boot() {
     $('#map-hud').hidden = true; // full-page views cover the map; its HUD must not bleed through
     if (which === 'polls') pollsWindow.show();
     else if (which === 'scorecard') scorecard.show();
+    else if (which === 'elections') elections.show();
     else if (which === 'lobbies') lobbies.show();
     else if (which === 'diagnostics') diagnostics.show();
     else if (which === 'settings') settings.show();
@@ -630,7 +651,7 @@ async function boot() {
     // view is currently showing — it never takes over the page.
     if (page === 'analyst') { analyst.openPanel(); return; }
 
-    if (page === 'polls' || page === 'scorecard' || page === 'lobbies' || page === 'settings' || page === 'diagnostics') {
+    if (page === 'polls' || page === 'scorecard' || page === 'elections' || page === 'lobbies' || page === 'settings' || page === 'diagnostics') {
       bag.setAnalystContext('nation', 'US', 'the national picture');
       pane.close();
       showView(page);

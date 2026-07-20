@@ -167,6 +167,19 @@ def cluster_fact(fact_id: int) -> None:
         raw = db.query_one("SELECT archival FROM raw_items WHERE id=?", (fact["raw_item_id"],))
         if raw and raw["archival"]:
             return  # archival: no story, no broadcast — lands silently
+    # US-relevance backstop, uniform across ALL sources (even trusted US desks
+    # syndicate world stories): a fact that matched NO US entity (no state, no
+    # race, no tracked candidate) AND carries a foreign marker never becomes a
+    # feed story — it lands silently, staying searchable/citable like archival.
+    if fact["state_fips"] is None and fact["race_id"] is None:
+        try:
+            entities = json.loads(fact["entities_json"] or "{}")
+        except (TypeError, ValueError):
+            entities = {}
+        if not entities.get("candidate_ids"):
+            from ingestion.store import foreign_hits
+            if foreign_hits(fact["summary"] or "") >= 1:
+                return  # international item: no story, no broadcast
     vec = embed(fact["summary"])
     threshold = cfg("correlation.same_window_similarity_threshold")
     gap_hours = cfg("correlation.same_window_max_gap_hours")

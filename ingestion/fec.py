@@ -36,18 +36,21 @@ def _api_key(source: dict) -> str:
 
 def _link_race(candidate_id: int, office: str, state_fips: str | None,
                district: int | None, cycle: int, party: str | None, incumbent: bool) -> None:
+    # phase='general' everywhere: with primary-phase rows now seeded, an
+    # unfiltered lookup could nondeterministically link a filing to the primary
     if office == "house" and state_fips is not None and district is not None:
         race = db.query_one(
             "SELECT r.id FROM races r JOIN congressional_districts d "
             "ON d.district_version_id=r.district_version_id "
-            "WHERE r.race_type='house' AND r.cycle_year=? AND d.state_fips=? AND d.district_number=?",
+            "WHERE r.race_type='house' AND r.phase='general' AND r.cycle_year=? "
+            "AND d.state_fips=? AND d.district_number=?",
             (cycle, state_fips, district))
     elif office == "president":
-        race = db.query_one("SELECT id FROM races WHERE race_type='president' AND cycle_year=? "
-                            "AND state_fips IS NULL", (cycle,))
+        race = db.query_one("SELECT id FROM races WHERE race_type='president' AND phase='general' "
+                            "AND cycle_year=? AND state_fips IS NULL", (cycle,))
     else:
-        race = db.query_one("SELECT id FROM races WHERE race_type=? AND cycle_year=? AND state_fips=?",
-                            (office, cycle, state_fips))
+        race = db.query_one("SELECT id FROM races WHERE race_type=? AND phase='general' "
+                            "AND cycle_year=? AND state_fips=?", (office, cycle, state_fips))
     if race:
         db.execute("INSERT OR IGNORE INTO race_candidates(race_id,candidate_id,party_code,is_incumbent) "
                    "VALUES(?,?,?,?)", (race["id"], candidate_id, party, int(incumbent)))

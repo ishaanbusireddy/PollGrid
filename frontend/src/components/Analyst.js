@@ -85,6 +85,10 @@ export class Analyst {
     this.open = true;
     this.panel.classList.add('open');
     this.orb.classList.add('active');
+    // poof: the orb bursts and vanishes while the panel is open — it "became"
+    // the panel. It reappears (materialize) on close.
+    this.orb.classList.remove('materialize');
+    this.orb.classList.add('poof');
     this._reloadSession();
     this._renderContext();
     const input = this.panel.querySelector('input');
@@ -95,6 +99,8 @@ export class Analyst {
     this.open = false;
     this.panel.classList.remove('open');
     this.orb.classList.remove('active');
+    this.orb.classList.remove('poof');
+    this.orb.classList.add('materialize');
     clearInterval(this._timer);
   }
 

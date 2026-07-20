@@ -86,7 +86,7 @@ def run(progress=None, item_progress=None) -> dict:
         ("poll_averages", lambda: averaging.run_all()),
         ("forecasts", lambda: sum(1 for r in db.query(
             "SELECT DISTINCT race_id id FROM poll_averages UNION "
-            "SELECT id FROM races WHERE race_type != 'generic_ballot' LIMIT 600")
+            "SELECT id FROM races WHERE race_type != 'generic_ballot' AND phase='general' LIMIT 600")
             if forecasting.compute(r["id"]))),
         # the genius layer's production loop (audit #14/#15): re-score the factor
         # vector for active races, then produce ensemble forecasts wherever

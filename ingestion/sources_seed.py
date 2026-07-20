@@ -84,6 +84,8 @@ SOURCES = [
 NON_US_DOMESTIC_SOURCES = [
     "Google News US politics",                 # topic firehose — syndicates world coverage
     "Targeted race search (Google News RSS)",  # open web search — same mixed pool
+    "The Guardian US politics",                # international desk — its 'US politics' RSS
+                                               # carries heavy world coverage; gate it
 ]
 
 OUTLETS = [

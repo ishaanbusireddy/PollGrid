@@ -104,6 +104,9 @@ export class Api {
   pollsterRatings()    { return this.tryGet('/api/pollsters/ratings'); }
   pollsterRating(id)   { return this.tryGet(`/api/pollsters/${id}/rating`); }
   fairness(dvId)       { return this.tryGet(`/api/districts/${dvId}/fairness`); }
+  elections(state)     { return this.tryGet('/api/elections', state ? { state } : {}); }
+  officeholders(fips)  { return this.tryGet(`/api/officeholders/${fips}`); }
+  racesByPhase(f)      { return this.tryGet('/api/races', f); } // pass {phase:'primary'|'all',...}
   audit(metricId)      { return this.tryGet(`/api/audit/${metricId}`); }
   counterfactual(raceId, scenario) { return this.tryGet('/api/counterfactual', { race_id: raceId, scenario }); }
 

@@ -30,7 +30,7 @@ function el(html) {
 function avatar(name, partyCode, portraitUrl, large = false) {
   const words = String(name || '?').trim().split(/\s+/).filter(Boolean);
   const initials = ((words[0]?.[0] || '?') + (words.length > 1 ? words[words.length - 1][0] : '')).toUpperCase();
-  const cls = partyCode === 'DEM' ? 'dem' : partyCode === 'REP' ? 'rep' : '';
+  const cls = partyChipClass(partyCode) === 'other' ? '' : partyChipClass(partyCode);
   const wrap = el(`<span class="avatar ${cls}${large ? ' lg' : ''}"><span class="avatar-initials">${escapeHtml(initials)}</span></span>`);
   if (portraitUrl) {
     const img = document.createElement('img');
@@ -92,7 +92,8 @@ function empty(msg, why) {
 }
 
 function partyChipClass(code) {
-  return code === 'DEM' ? 'dem' : code === 'REP' ? 'rep' : 'other';
+  const map = { DEM: 'dem', REP: 'rep', GRN: 'grn', LIB: 'lib', IND: 'ind' };
+  return map[code] || 'other';
 }
 
 export class SlidePane {
@@ -425,8 +426,9 @@ export class SlidePane {
     if (this.bag.setAnalystContext) this.bag.setAnalystContext('race', id, r.name || `race #${id}`);
     body.appendChild(el(`<h2 class="pane-title">${escapeHtml(r.name || 'Race #' + id)}</h2>`));
     body.appendChild(el(`<div class="pane-sub">${officeIcon(r.race_type, OFFICE_LABEL[r.race_type])}${escapeHtml(r.race_type || '')} · cycle ${escapeHtml(String(r.cycle_year || '?'))}
-      · ${escapeHtml(r.phase || '')} ${r.status ? '· ' + escapeHtml(r.status) : ''}
-      ${r.competitiveness ? `· <span class="chip accent">${escapeHtml(r.competitiveness)}</span>` : ''}</div>`));
+      ${r.phase === 'primary' ? '· <span class="chip lib">primary</span>' : ''} ${r.status ? '· ' + escapeHtml(r.status) : ''}
+      ${r.election_date ? `· <span class="mono" style="font-size:11px">${escapeHtml(new Date(r.election_date + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }))}</span>` : ''}
+      ${r.competitiveness && r.competitiveness !== 'unrated' ? `· <span class="chip accent">${escapeHtml(r.competitiveness)}</span>` : ''}</div>`));
 
     const btnRow = el(`<div class="row"></div>`);
     btnRow.appendChild(this._analystButton('race', id, r.name || `race #${id}`));
@@ -784,7 +786,8 @@ export class SlidePane {
       { key: 'coverage', label: 'Coverage' },
     ]);
 
-    // overview: races in this state
+    // overview: current leadership first (who runs this state TODAY), then races
+    this._fill(tabs.overview, await this._leadershipPanel(fips));
     const { root: rp, body: rb } = panel('Races');
     if (races && races.length) {
       for (const r of races.slice(0, 15)) {
@@ -792,10 +795,11 @@ export class SlidePane {
           <span class="v">${r.leader_party ? `<span class="chip ${partyChipClass(r.leader_party)}">${escapeHtml(r.leader_party)}${r.leader_margin != null ? ' +' + Number(r.leader_margin).toFixed(1) : ''}</span>` : ''}</span></div>`));
       }
     } else rb.appendChild(empty('No tracked races here.', `GET /api/races?state=${fips} empty or unavailable`));
-    this._fill(tabs.overview, rp);
+    tabs.overview.appendChild(rp);
 
-    // elections: history + statewide polls
-    this._fill(tabs.elections, await this._historyPanel('state', fips));
+    // elections: this state's 2026 calendar + dated races, then history + polls
+    this._fill(tabs.elections, await this._stateElectionsPanel(fips));
+    tabs.elections.appendChild(await this._historyPanel('state', fips));
     tabs.elections.appendChild(await this._pollsPanel({ state: fips }, 'Statewide-scope polls (Senate, Governor, President-in-state).'));
 
     // demographics (+ voter-registration block when those rows exist)
@@ -808,58 +812,153 @@ export class SlidePane {
     this._fill(tabs.coverage, this._geoArticlesNote());
   }
 
-  /** Delegation tab — portrait grid of this state's officeholders/candidates
-      (governor / senate / house), initials avatars when a portrait is missing
-      or unloadable, plus an inline-SVG party-split donut. */
-  async _delegationPanel(fips) {
-    const { root, body } = panel('Delegation & candidates');
-    const offices = ['governor', 'senate', 'house'];
-    const results = await Promise.all(offices.map((o) =>
-      this.bag.api.candidates({ state: fips, office: o, limit: 60 })));
-    const people = [];
-    const seen = new Set();
-    results.forEach((rows, i) => {
-      for (const c of rows || []) {
-        if (seen.has(c.id)) continue;
-        seen.add(c.id);
-        people.push({ ...c, office: c.office || offices[i] });
-      }
-    });
-    if (!people.length) {
-      body.appendChild(empty('No tracked officeholders or candidates for this state.',
-        `GET /api/candidates?state=${fips}&office=governor|senate|house empty or unavailable`));
+  /** "Current leadership" — WHO GOVERNS TODAY: governor + both senators from
+      the person-level officeholder roster. Distinct from candidates. */
+  async _leadershipPanel(fips) {
+    const { root, body } = panel('Current leadership');
+    const oh = await this.bag.api.officeholders(fips);
+    if (!oh || (!oh.governor && !(oh.senators || []).length)) {
+      body.appendChild(empty('No officeholder roster for this state yet.',
+        `GET /api/officeholders/${fips} empty or unavailable`));
       return root;
     }
-    people.sort((a, b) => offices.indexOf(a.office) - offices.indexOf(b.office) || String(a.name).localeCompare(String(b.name)));
-
-    // party-split donut
-    const counts = { DEM: 0, REP: 0, other: 0 };
-    for (const p of people) counts[p.party_code === 'DEM' || p.party_code === 'REP' ? p.party_code : 'other']++;
-    const donutRow = el(`<div class="row" style="margin-bottom:10px"></div>`);
-    donutRow.appendChild(donutSvg([
-      { label: 'Democratic', value: counts.DEM, colorVar: 'var(--dem)' },
-      { label: 'Republican', value: counts.REP, colorVar: 'var(--rep)' },
-      { label: 'Other / unaffiliated', value: counts.other, colorVar: 'var(--other)' },
-    ]));
-    donutRow.appendChild(el(`<div style="font-size:11px">
-      <div><span class="chip dem">DEM ${counts.DEM}</span></div>
-      <div class="mt" style="margin-top:4px"><span class="chip rep">REP ${counts.REP}</span></div>
-      ${counts.other ? `<div style="margin-top:4px"><span class="chip other">OTHER ${counts.other}</span></div>` : ''}
-    </div>`));
-    body.appendChild(donutRow);
-
-    const grid = el(`<div class="delegation-grid"></div>`);
-    for (const p of people.slice(0, 48)) {
-      const card = el(`<a class="delegate-card" href="#/candidate/${p.id}"></a>`);
-      card.appendChild(avatar(p.name, p.party_code, p.portrait_url));
-      card.appendChild(el(`<span class="delegate-name">${escapeHtml(p.name)}</span>`));
-      card.appendChild(el(`<span class="delegate-office">${officeIcon(p.office)}${escapeHtml(OFFICE_LABEL[p.office] || p.office || '')} <span class="chip ${partyChipClass(p.party_code)}">${escapeHtml(p.party_code || '?')}</span></span>`));
-      grid.appendChild(card);
-    }
+    const card = (p, label) => {
+      const c = el(`<a class="delegate-card wide" href="#/candidate/${p.candidate_id}"></a>`);
+      c.appendChild(avatar(p.name, p.party_code, p.portrait_url));
+      c.appendChild(el(`<span class="delegate-name">${escapeHtml(p.name)}</span>`));
+      c.appendChild(el(`<span class="delegate-office">${escapeHtml(label)}
+        <span class="chip ${partyChipClass(p.party_code)}">${escapeHtml(p.party_code || '?')}</span></span>`));
+      return c;
+    };
+    const grid = el(`<div class="delegation-grid leadership"></div>`);
+    if (oh.governor) grid.appendChild(card(oh.governor, 'Governor'));
+    for (const s of oh.senators || []) grid.appendChild(card(s, 'U.S. Senator'));
     body.appendChild(grid);
-    if (people.length > 48) body.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:6px">${people.length - 48} more not shown</div>`));
-    body.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:6px">tracked candidates & officeholders from filing records — portraits load from cited sources, initials otherwise</div>`));
     return root;
+  }
+
+  /** State Elections tab header — this state's 2026 primary/general dates plus
+      its dated races, grouped by phase. */
+  async _stateElectionsPanel(fips) {
+    const { root, body } = panel('2026 elections in this state');
+    const e = await this.bag.api.elections(fips);
+    if (!e || !(e.entries || []).length) {
+      body.appendChild(empty('No election calendar for this state.',
+        `GET /api/elections?state=${fips} empty or unavailable`));
+      return root;
+    }
+    const fmt = (d) => new Date(d + 'T12:00:00').toLocaleDateString(undefined,
+      { weekday: 'short', month: 'long', day: 'numeric' });
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const strip = el(`<div class="cal-strip"></div>`);
+    for (const en of e.entries) {
+      const past = en.date < todayIso;
+      strip.appendChild(el(`<div class="cal-tile ${past ? 'past' : 'upcoming'}">
+        <div class="ct-kind">${escapeHtml(en.kind)}</div>
+        <div class="ct-date">${escapeHtml(fmt(en.date))}</div>
+        <div class="ct-note">${past ? 'held' : 'upcoming'}</div>
+      </div>`));
+    }
+    body.appendChild(strip);
+    const races = e.races || [];
+    const byPhase = { primary: [], general: [] };
+    for (const r of races) (byPhase[r.phase] ||= []).push(r);
+    for (const [phase, rows] of Object.entries(byPhase)) {
+      if (!rows.length) continue;
+      body.appendChild(el(`<div class="dim" style="font-size:11px;margin-top:8px;text-transform:uppercase;letter-spacing:.06em">${phase === 'primary' ? 'Primary contests' : 'General election contests'}</div>`));
+      for (const r of rows.slice(0, 24)) {
+        body.appendChild(el(`<div class="kv"><span class="k">${officeIcon(r.race_type)}<a href="#/race/${r.id}">${escapeHtml(r.name)}</a></span>
+          <span class="v mono" style="font-size:10px">${escapeHtml(r.election_date || '')}</span></div>`));
+      }
+      if (rows.length > 24) body.appendChild(el(`<div class="dim" style="font-size:10px">${rows.length - 24} more — see the Elections page</div>`));
+    }
+    return root;
+  }
+
+  /** Delegation tab — SPLIT: current House delegation (from the officeholder
+      roster) first, then 2026 candidates (FEC filings) separately. Officeholders
+      are who serve; candidates are who is running — never blended. */
+  async _delegationPanel(fips) {
+    const wrap = document.createElement('div');
+    const oh = await this.bag.api.officeholders(fips);
+
+    // -- current House delegation (person-level roster)
+    {
+      const { root, body } = panel('House delegation (serving now)');
+      const reps = (oh && oh.house) || [];
+      if (reps.length) {
+        const counts = { DEM: 0, REP: 0, other: 0 };
+        for (const p of reps) counts[p.party_code === 'DEM' || p.party_code === 'REP' ? p.party_code : 'other']++;
+        const donutRow = el(`<div class="row" style="margin-bottom:10px"></div>`);
+        donutRow.appendChild(donutSvg([
+          { label: 'Democratic', value: counts.DEM, colorVar: 'var(--dem)' },
+          { label: 'Republican', value: counts.REP, colorVar: 'var(--rep)' },
+          { label: 'Other / independent', value: counts.other, colorVar: 'var(--other)' },
+        ]));
+        donutRow.appendChild(el(`<div style="font-size:11px">
+          <div><span class="chip dem">DEM ${counts.DEM}</span></div>
+          <div style="margin-top:4px"><span class="chip rep">REP ${counts.REP}</span></div>
+          ${counts.other ? `<div style="margin-top:4px"><span class="chip other">OTHER ${counts.other}</span></div>` : ''}
+        </div>`));
+        body.appendChild(donutRow);
+        const grid = el(`<div class="delegation-grid"></div>`);
+        for (const p of reps.sort((a, b) => (a.district_number || 0) - (b.district_number || 0))) {
+          const card = el(`<a class="delegate-card" href="#/candidate/${p.candidate_id}"></a>`);
+          card.appendChild(avatar(p.name, p.party_code, p.portrait_url));
+          card.appendChild(el(`<span class="delegate-name">${escapeHtml(p.name)}</span>`));
+          card.appendChild(el(`<span class="delegate-office">${p.district_number === 0 ? 'At-large' : 'District ' + p.district_number}
+            <span class="chip ${partyChipClass(p.party_code)}">${escapeHtml(p.party_code || '?')}</span></span>`));
+          grid.appendChild(card);
+        }
+        body.appendChild(grid);
+      } else {
+        body.appendChild(empty('House delegation roster not synced yet.',
+          'fills from the Congress.gov member sync (needs CONGRESS_GOV_API_KEY) — governor & senators still show under Overview'));
+      }
+      wrap.appendChild(root);
+    }
+
+    // -- 2026 candidates (filings) — separate from who currently serves
+    {
+      const { root, body } = panel('2026 candidates (filed)');
+      const offices = ['governor', 'senate', 'house'];
+      const results = await Promise.all(offices.map((o) =>
+        this.bag.api.candidates({ state: fips, office: o, limit: 60 })));
+      const holderIds = new Set([
+        ...(oh && oh.governor ? [oh.governor.candidate_id] : []),
+        ...((oh && oh.senators) || []).map((s) => s.candidate_id),
+        ...((oh && oh.house) || []).map((h) => h.candidate_id),
+      ]);
+      const people = [];
+      const seen = new Set();
+      results.forEach((rows, i) => {
+        for (const c of rows || []) {
+          if (seen.has(c.id)) continue;
+          seen.add(c.id);
+          people.push({ ...c, office: c.office || offices[i], serving: holderIds.has(c.id) });
+        }
+      });
+      if (!people.length) {
+        body.appendChild(empty('No filed candidates tracked for this state yet.',
+          'fills as the FEC roster sync lands'));
+      } else {
+        people.sort((a, b) => offices.indexOf(a.office) - offices.indexOf(b.office) || String(a.name).localeCompare(String(b.name)));
+        const grid = el(`<div class="delegation-grid"></div>`);
+        for (const p of people.slice(0, 48)) {
+          const card = el(`<a class="delegate-card" href="#/candidate/${p.id}"></a>`);
+          card.appendChild(avatar(p.name, p.party_code, p.portrait_url));
+          card.appendChild(el(`<span class="delegate-name">${escapeHtml(p.name)}</span>`));
+          card.appendChild(el(`<span class="delegate-office">${officeIcon(p.office)}${escapeHtml(OFFICE_LABEL[p.office] || p.office || '')}
+            <span class="chip ${partyChipClass(p.party_code)}">${escapeHtml(p.party_code || '?')}</span>
+            ${p.serving ? '<span class="chip">incumbent</span>' : ''}</span>`));
+          grid.appendChild(card);
+        }
+        body.appendChild(grid);
+        if (people.length > 48) body.appendChild(el(`<div class="dim" style="font-size:10px;margin-top:6px">${people.length - 48} more not shown</div>`));
+      }
+      wrap.appendChild(root);
+    }
+    return wrap;
   }
 
   async _countyPage(body, geoid) {
@@ -896,7 +995,63 @@ export class SlidePane {
 
   async _districtPage(body, id) {
     body.innerHTML = '';
-    body.appendChild(el(`<h2 class="pane-title">District ${escapeHtml(String(id))}</h2>`));
+    // resolve this district_version_id → state/number metadata for a REAL header
+    let meta = null;
+    let stateFips = null;
+    const allDistricts = await this.bag.api.geoDistricts();
+    if (allDistricts) meta = allDistricts.find((d) => String(d.district_version_id) === String(id));
+    if (meta) stateFips = meta.state_fips;
+    const stateName = stateFips ? (this.bag.statesByFips[stateFips]?.name || stateFips) : null;
+    const dn = meta ? meta.district_number : null;
+    const label = meta
+      ? `${stateName} ${dn === 0 ? 'At-large' : 'District ' + dn}`
+      : `District ${id}`;
+    body.appendChild(el(`<h2 class="pane-title">${escapeHtml(label)}</h2>`));
+    body.appendChild(el(`<div class="pane-sub">${meta ? `GEOID ${escapeHtml(meta.geoid || '?')} · congress ${escapeHtml(String(meta.congress_number || '?'))}` : `version ${escapeHtml(String(id))}`}</div>`));
+    if (this.bag.setAnalystContext) this.bag.setAnalystContext('congressional_district', id, label);
+
+    const btns = el(`<div class="row"></div>`);
+    btns.appendChild(this._analystButton('congressional_district', id, label));
+    if (stateFips) {
+      const up = el(`<button>↑ ${escapeHtml(stateName)}</button>`);
+      up.addEventListener('click', () => this.bag.navigate(`#/state/${stateFips}`));
+      btns.appendChild(up);
+    }
+    body.appendChild(btns);
+
+    // current representative (person-level roster)
+    if (stateFips) {
+      const { root, body: rb } = panel('Current representative');
+      const oh = await this.bag.api.officeholders(stateFips);
+      const rep = ((oh && oh.house) || []).find((h) => h.district_number === dn);
+      if (rep) {
+        const card = el(`<a class="delegate-card wide" href="#/candidate/${rep.candidate_id}"></a>`);
+        card.appendChild(avatar(rep.name, rep.party_code, rep.portrait_url));
+        card.appendChild(el(`<span class="delegate-name">${escapeHtml(rep.name)}</span>`));
+        card.appendChild(el(`<span class="delegate-office">U.S. Representative
+          <span class="chip ${partyChipClass(rep.party_code)}">${escapeHtml(rep.party_code || '?')}</span></span>`));
+        rb.appendChild(card);
+      } else {
+        rb.appendChild(empty('Representative roster not synced for this district yet.',
+          'fills from the Congress.gov member sync (CONGRESS_GOV_API_KEY)'));
+      }
+      body.appendChild(root);
+    }
+
+    // the district's 2026 House race(s) — general + primary, direct links
+    if (stateFips) {
+      const races = await this.bag.api.racesByPhase({ type: 'house', state: stateFips, phase: 'all' });
+      const mine = (races || []).filter((r) => r.district_number === dn);
+      if (mine.length) {
+        const { root, body: rb } = panel('2026 races here');
+        for (const r of mine.sort((a, b) => String(a.phase).localeCompare(String(b.phase)))) {
+          rb.appendChild(el(`<div class="kv"><span class="k">${officeIcon('house')}<a href="#/race/${r.id}">${escapeHtml(r.name)}</a></span>
+            <span class="v">${r.leader_party ? `<span class="chip ${partyChipClass(r.leader_party)}">${escapeHtml(r.leader_party)}${r.leader_margin != null ? ' +' + Number(r.leader_margin).toFixed(1) : ''}</span>` : `<span class="mono dim" style="font-size:10px">${escapeHtml(r.election_date || '')}</span>`}</span></div>`));
+        }
+        body.appendChild(root);
+      }
+    }
+
     const fair = await this.bag.api.fairness(id);
     if (fair) {
       const { root, body: fb } = panel('Plan fairness');
@@ -904,11 +1059,11 @@ export class SlidePane {
       fb.appendChild(el(`<div class="kv"><span class="k">mean–median</span><span class="v">${fair.mean_median != null ? (fair.mean_median * 100).toFixed(1) + '%' : '—'}</span></div>`));
       fb.appendChild(el(`<div class="kv"><span class="k">districts in plan</span><span class="v">${fair.n_districts ?? '—'}</span></div>`));
       body.appendChild(root);
-    } else {
-      body.appendChild(empty('District fairness data unavailable.', `GET /api/districts/${id}/fairness failed`));
     }
-    body.appendChild(await this._pollsPanel({}, 'District-race polls appear here once district data is live.'));
-    body.appendChild(this._geoArticlesNote());
+    if (stateFips) {
+      body.appendChild(await this._pollsPanel({ state: stateFips },
+        `${stateName} state/district-scope polls covering this district.`, 'Polls covering this district'));
+    }
     body.appendChild(await this._historyPanel('congressional_district', id));
     body.appendChild(await this._demographicsPanel('congressional_district', id));
   }

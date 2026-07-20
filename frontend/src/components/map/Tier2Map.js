@@ -136,6 +136,17 @@ export class Tier2Map {
     const x = (clientX - rect.left) * dpr, y = (clientY - rect.top) * dpr;
     const ctx = this.ctx;
     this._applyTransform(ctx);
+    // House mode: districts are what's drawn, so districts are what you click
+    if (this.choropleth.tier === 'district' && this.districts) {
+      for (let i = 0; i < this.districts.features.length; i++) {
+        if (ctx.isPointInPath(this.districts.paths[i], x, y)) {
+          const f = this.districts.features[i];
+          const key = f.id || (f.properties && f.properties.GEOID);
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          return { tier: 'district', key, stateFips: String(key || '').slice(0, 2) };
+        }
+      }
+    }
     const layer = this.showCounties && this.counties ? this.counties : this.states;
     for (let i = 0; i < layer.features.length; i++) {
       if (ctx.isPointInPath(layer.paths[i], x, y)) {

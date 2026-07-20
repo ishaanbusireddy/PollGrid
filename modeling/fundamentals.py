@@ -151,7 +151,8 @@ def classify_competitiveness(race_id: int) -> str | None:
 def classify_all_competitiveness() -> int:
     n = 0
     for r in db.query(
-            "SELECT id FROM races WHERE status IN ('upcoming','live') AND race_type != 'generic_ballot'"):
+            "SELECT id FROM races WHERE status IN ('upcoming','live') AND race_type != 'generic_ballot' "
+            "AND phase='general'"):
         if classify_competitiveness(r["id"]):
             n += 1
     return n

@@ -404,6 +404,7 @@ export class Tier1Globe {
   setDistrictsGeo(geo) {
     this.districtsGeo = geo;
     if (geo) {
+      this.districtInfo = geo.features.map(featureInfo); // bboxes for picking
       const m = buildLayerMesh(geo.features, 1.0018, 1.0035);
       this.districtMesh = this._uploadLayer(m, geo.features.length);
       this.applyColors(); // color the fresh mesh now (setCountiesGeo does the same)
@@ -629,6 +630,20 @@ export class Tier1Globe {
 
     const st = this._findFeature(this.states, lon, lat);
     if (!st) return null;
+    // House mode: districts are what's drawn, so districts are what you click
+    if (this.choropleth.tier === 'district' && this.districtsGeo && this.districtInfo) {
+      const stateFips = st.feature.id;
+      for (let i = 0; i < this.districtsGeo.features.length; i++) {
+        const f = this.districtsGeo.features[i];
+        const key = f.id || (f.properties && f.properties.GEOID);
+        if (String(key || '').slice(0, 2) !== stateFips) continue;
+        const bb = this.districtInfo[i].bbox;
+        if (lon < bb[0] || lon > bb[2] || lat < bb[1] || lat > bb[3]) continue;
+        if (pointInFeature(lon, lat, f)) {
+          return { tier: 'district', key, stateFips, lat, lon };
+        }
+      }
+    }
     if (this.showCounties && this.counties) {
       const stateFips = st.feature.id;
       const cands = [];

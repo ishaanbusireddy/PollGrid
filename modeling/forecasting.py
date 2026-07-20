@@ -31,6 +31,8 @@ def compute(race_id: int, as_of: str | None = None) -> dict | None:
     race = db.query_one("SELECT * FROM races WHERE id=?", (race_id,))
     if race is None or race["race_type"] == "generic_ballot":
         return None
+    if race["phase"] != "general":
+        return None  # a primary is not D-vs-R — a two-party win prob would be meaningless
     avg = latest_average(race_id, as_of)
     fund = fdx.latest(race_id, as_of) or fdx.compute(race_id, as_of)
     if avg is None and fund is None:

@@ -217,6 +217,16 @@ CREATE TABLE IF NOT EXISTS officeholders (
   start_date TEXT NOT NULL, end_date TEXT
 );
 
+CREATE TABLE IF NOT EXISTS election_calendar (
+  id INTEGER PRIMARY KEY,
+  state_fips TEXT NOT NULL,
+  cycle_year INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('primary','runoff','general')),
+  election_date TEXT NOT NULL,
+  source TEXT NOT NULL,
+  UNIQUE (state_fips, cycle_year, kind)
+);
+
 CREATE TABLE IF NOT EXISTS pacs (
   id INTEGER PRIMARY KEY, fec_committee_id TEXT UNIQUE, name TEXT NOT NULL,
   type TEXT, total_receipts REAL, total_disbursements REAL, synced_at TEXT
@@ -612,6 +622,7 @@ _NEW_COLUMNS: dict[str, dict[str, str]] = {
     "candidates": {"portrait_url": "TEXT"},
     "pollster_ratings": {"region": "TEXT NOT NULL DEFAULT 'national'"},
     "qualitative_factor_scores": {"scored_against_fact_id": "INTEGER"},
+    "races": {"election_date": "TEXT"},
 }
 
 
