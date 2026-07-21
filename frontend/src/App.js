@@ -265,9 +265,11 @@ async function boot() {
       toast(`New poll: ${p.pollster || '?'} — ${p.race_name || 'race #' + p.race_id}`);
       liveRefresh({ raceId: p.race_id, panes: true }); // update the open race if it's this one
     } else if (frame.type === 'recompute') {
-      // the server's deterministic fast loop refreshed averages/forecasts/map —
-      // re-color the map and re-render the open data pane / Polls browser
-      liveRefresh({ remap: true, panes: true });
+      // the server's deterministic loop refreshed averages/forecasts — re-color the
+      // map only (cheap, no scroll jank). An open race pane still refreshes on its
+      // own 'poll' frame and on navigation; keeping this map-only avoids periodic
+      // re-render jank that read as lag.
+      liveRefresh({ remap: true });
     } else if (frame.type === 'volatility') {
       // volatility feature removed from the UI — frame intentionally ignored
     } else if (frame.type === 'race_call') {

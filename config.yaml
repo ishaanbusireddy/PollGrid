@@ -21,8 +21,10 @@ ingestion:
     markets: 300
     social: 900
     results_native: 30      # tightened by election-night mode (ingestion/scheduler.py)
-  live_recompute_seconds: 600  # deterministic fast pipeline (averages/forecasts/map)
-                               # cadence — separate from the once-a-day LLM nightly
+  live_recompute_seconds: 180        # LIGHT deterministic pass (competitiveness +
+                                     # averages + active-race forecasts) — fast, frequent
+  live_recompute_heavy_seconds: 1800  # HEAVY pass (full sweep + 20k-sim chamber
+                                      # models); rare + skipped when no new data landed
   election_night:
     results_native_seconds: 15
   ap_elections:

@@ -65,9 +65,13 @@ def run(source: dict) -> None:
     cycle = CYCLES[int(db.meta_get("fec_cycle_idx", "0")) % len(CYCLES)]
 
     # marquee-first: fill competitive-race finance BEFORE the alphabetical roster
-    # walk spends the (DEMO_KEY-tight) budget, so the most-viewed races don't wait
-    # for the whole roster page-through to complete
-    _priority_finance_pass(base, key, cycle)
+    # walk — BUT only once the roster has been built at least once. During the
+    # fast catch-up phase (roster not yet synced) each run does exactly ONE
+    # candidates-page request; firing the ~20-request finance burst on every 5s
+    # tick is what tripped FEC's rate limit and knocked the source offline before
+    # the roster ever completed. Enrichment waits until the roster exists.
+    if db.meta_get("fec_roster_synced_at"):
+        _priority_finance_pass(base, key, cycle)
 
     budget.spend("fec")
     data = get_json(f"{base}/candidates/", {

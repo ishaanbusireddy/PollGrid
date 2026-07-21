@@ -81,13 +81,22 @@ def _source_loop(source_id: int) -> None:
             _set_health(source_id, "ok", failures, str(e))  # deliberately not a failure
             interval = max_backoff
         except Exception as e:
-            failures += 1
-            health = "degraded" if failures < down_after else "down"
-            _set_health(source_id, health, failures, f"{type(e).__name__}: {e}")
-            interval = min(base * (multiplier ** failures), max_backoff)
             from ingestion.http import FetchError
-            if not isinstance(e, FetchError):  # network flake is expected noise; real bugs get a trace
-                traceback.print_exc()
+            # A rate-limit (429) or transient 503 is NOT a source failure — it means
+            # "you're going too fast." Stay healthy, wait it out, and resume, rather
+            # than marking the source down (which is what silently killed FEC when the
+            # catch-up cadence hammered it). No failure-count escalation.
+            if isinstance(e, FetchError) and getattr(e, "status", None) in (429, 503):
+                _set_health(source_id, "ok", failures,
+                            f"rate-limited (HTTP {e.status}) — backing off, will resume")
+                interval = min(max(base * 6, 300), max_backoff)
+            else:
+                failures += 1
+                health = "degraded" if failures < down_after else "down"
+                _set_health(source_id, health, failures, f"{type(e).__name__}: {e}")
+                interval = min(base * (multiplier ** failures), max_backoff)
+                if not isinstance(e, FetchError):  # network flake is noise; real bugs get a trace
+                    traceback.print_exc()
         stop_event.wait(interval)
 
 

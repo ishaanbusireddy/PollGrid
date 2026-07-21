@@ -47,10 +47,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_raw(self, status: int, content_type: str, body: bytes) -> None:
+    def _send_raw(self, status: int, content_type: str, body: bytes,
+                  cache: str | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if cache is not None:
+            self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -74,8 +77,11 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         if full.endswith(".js"):
             ctype = "text/javascript"
+        # no-cache so an in-place version update (unzip over the clone) always takes
+        # effect: the browser must revalidate instead of serving stale ES modules,
+        # which previously left a mismatched mix of old+new JS and broke the SPA.
         with open(full, "rb") as fh:
-            self._send_raw(200, ctype, fh.read())
+            self._send_raw(200, ctype, fh.read(), cache="no-cache, no-store, must-revalidate")
 
     def _dispatch(self, method: str) -> None:
         from api import routes  # noqa: F401 — ensures registration

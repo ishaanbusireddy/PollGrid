@@ -16,7 +16,9 @@ class BudgetExhausted(Exception):
 
 
 class FetchError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status when known (e.g. 429 rate-limit), else None
 
 
 _UA = "PollGrid/1.0 (+local research tool)"
@@ -41,7 +43,7 @@ def get(url: str, params: dict | None = None, headers: dict | None = None, timeo
         except Exception:
             pass
         detail = f": {body}" if body.strip() else ""
-        raise FetchError(f"HTTP {e.code} for {url.split('?')[0]}{detail}") from e
+        raise FetchError(f"HTTP {e.code} for {url.split('?')[0]}{detail}", status=e.code) from e
     except Exception as e:
         raise FetchError(f"{type(e).__name__}: {e}") from e
 
